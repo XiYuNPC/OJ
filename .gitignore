@@ -1,0 +1,23 @@
+# 依赖
+node_modules/
+
+# 运行时数据（SQLite 数据库 + 启动时自动生成的密钥，均不进仓库）
+data/
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时 / 诊断文件
+*.tmp
+.tmp-*
+undefined*
+
+# IDE / 工具数据
+.codebuddy/

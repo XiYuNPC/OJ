@@ -1,0 +1,21 @@
+{
+  "name": "weboj",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WebOJ —— Web 端在线评测系统（Node.js + Express + SQLite，纯前端 C++ WASM 判题，通信题）",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "seed": "node scripts/seed.js",
+    "test": "node scripts/test.js"
+  },
+  "engines": {
+    "node": ">=23.4"
+  },
+  "dependencies": {
+    "emception": "^1.0.15",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.0",
+    "ws": "^8.18.0"
+  }
+}
