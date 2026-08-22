@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>题库 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap">
+  <div class="page-head">
+    <div class="eyebrow">PROBLEM SET</div>
+    <h1 class="page-title">题库</h1>
+    <p class="page-sub">提交 C++ 代码，在浏览器内编译运行并比对测试数据。游客可浏览题目，登录后即可提交。</p>
+  </div>
+  <div id="list" class="card"><div class="empty">加载中…</div></div>
+</main>
+
+<script src="/js/api.js"></script>
+<script>
+  const { api, esc, renderNav, toast } = WOJ;
+  renderNav('problems');
+
+  async function load() {
+    const r = await api('GET', '/api/problems');
+    const box = document.getElementById('list');
+    if (r.status === 401) {
+      // token 失效：以游客身份重试
+      WOJ.clearSession();
+      renderNav('problems');
+      return load();
+    }
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">加载失败：${esc(r.json && r.json.error || '未知错误')}</div>`;
+      return;
+    }
+    const items = r.json;
+    if (!items.length) {
+      box.innerHTML = `<div class="empty">题库暂无题目。管理员可在<a href="/admin.html">后台</a>发布题目。</div>`;
+      return;
+    }
+    box.innerHTML = items
+      .map(
+        (p) => `
+      <a class="problem-card" href="/problem.html?id=${p.id}" style="display:flex;align-items:center;gap:18px;padding:15px 20px;border-bottom:1px solid var(--line);color:inherit;">
+        <span class="pid">P${String(p.id).padStart(4, '0')}</span>
+        <span class="ptitle" style="flex:1;">${esc(p.title)}</span>
+        <span class="meta">
+          ${p.isCommunication ? '<span class="chip chip-comm">通信题</span>' : ''}
+          <span class="chip">${esc(p.timeLimitMs)}ms</span>
+          <span class="chip">${esc(p.memoryLimitMb)}MB</span>
+          ${p.isPublished ? '' : '<span class="chip">已下架</span>'}
+        </span>
+      </a>`
+      )
+      .join('');
+    if (box.firstElementChild) box.firstElementChild.style.borderBottom = 'none';
+  }
+
+  load().catch((e) => toast('加载失败：' + e.message, 'err'));
+</script>
+</body>
+</html>

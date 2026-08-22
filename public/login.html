@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap" style="max-width:460px;margin:0 auto;">
+  <div class="card" style="margin-top:40px;">
+    <div class="tabs" style="margin-bottom:18px;">
+      <button class="tab active" id="tab-login">登录</button>
+      <button class="tab" id="tab-register">注册</button>
+    </div>
+
+    <div id="panel-login">
+      <div class="field">
+        <label>用户名</label>
+        <input type="text" id="login-username" autocomplete="username">
+      </div>
+      <div class="field">
+        <label>密码</label>
+        <input type="password" id="login-password" autocomplete="current-password">
+      </div>
+      <div class="form-err hidden" id="login-err"></div>
+      <button class="btn btn-primary" id="login-btn" style="width:100%;justify-content:center;">登录</button>
+      <p class="hint small muted" style="margin-top:10px;">演示账号：会员 demo / demo123，管理员 admin / admin123</p>
+    </div>
+
+    <div id="panel-register" class="hidden">
+      <div class="field">
+        <label>用户名</label>
+        <input type="text" id="reg-username" autocomplete="username">
+        <div class="hint">3-32 位字母、数字或下划线</div>
+      </div>
+      <div class="field">
+        <label>密码</label>
+        <input type="password" id="reg-password" autocomplete="new-password">
+        <div class="hint">6-64 位</div>
+      </div>
+      <div class="form-err hidden" id="reg-err"></div>
+      <button class="btn btn-primary" id="reg-btn" style="width:100%;justify-content:center;">注册并登录</button>
+      <p class="hint small muted" style="margin-top:10px;">注册后即为「会员」，可提交代码与查看提交记录。</p>
+    </div>
+  </div>
+</main>
+
+<script src="/js/api.js"></script>
+<script>
+  const { api, setSession, renderNav, toast, qs } = WOJ;
+  renderNav();
+
+  const next = qs('next') || '/';
+
+  function showPanel(which) {
+    document.getElementById('panel-login').classList.toggle('hidden', which !== 'login');
+    document.getElementById('panel-register').classList.toggle('hidden', which !== 'register');
+    document.getElementById('tab-login').classList.toggle('active', which === 'login');
+    document.getElementById('tab-register').classList.toggle('active', which === 'register');
+    document.getElementById(which === 'login' ? 'login-err' : 'reg-err').classList.add('hidden');
+  }
+  document.getElementById('tab-login').addEventListener('click', () => showPanel('login'));
+  document.getElementById('tab-register').addEventListener('click', () => showPanel('register'));
+
+  function fail(id) {
+    const el = document.getElementById(id);
+    return (msg) => {
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    };
+  }
+  const loginFail = fail('login-err');
+  const regFail = fail('reg-err');
+
+  async function doLogin() {
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    if (!username || !password) return loginFail('请输入用户名与密码');
+    const r = await api('POST', '/api/auth/login', { username, password });
+    if (r.status !== 200) return loginFail(r.json && r.json.error || '登录失败');
+    setSession(r.json);
+    toast('已登录：' + r.json.user.username);
+    location.href = next;
+  }
+
+  async function doRegister() {
+    const username = document.getElementById('reg-username').value.trim();
+    const password = document.getElementById('reg-password').value;
+    if (!username || !password) return regFail('请输入用户名与密码');
+    const r = await api('POST', '/api/auth/register', { username, password });
+    if (r.status !== 201) return regFail(r.json && r.json.error || '注册失败');
+    const login = await api('POST', '/api/auth/login', { username, password });
+    if (login.status !== 200) {
+      toast('注册成功，请登录');
+      showPanel('login');
+      document.getElementById('login-username').value = username;
+      return;
+    }
+    setSession(login.json);
+    toast('注册成功，欢迎 ' + username);
+    location.href = next;
+  }
+
+  document.getElementById('login-btn').addEventListener('click', doLogin);
+  document.getElementById('reg-btn').addEventListener('click', doRegister);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const registering = !document.getElementById('panel-register').classList.contains('hidden');
+      registering ? doRegister() : doLogin();
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>题目 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap">
+  <div id="content"><div class="empty">加载中…</div></div>
+</main>
+
+<script src="/js/api.js"></script>
+<script src="/js/code-editor.js"></script>
+<script>
+  const { api, esc, qs, renderNav, toast, getUser, fmtTime, verdictBadge, statusDot } = WOJ;
+  renderNav();
+
+  const id = Number(qs('id'));
+  if (!id) {
+    document.getElementById('content').innerHTML = '<div class="empty">缺少题目编号</div>';
+  } else {
+    load();
+  }
+
+  async function load() {
+    const r = await api('GET', '/api/problems/' + id);
+    const box = document.getElementById('content');
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">${esc(r.json && r.json.error || '题目不存在或未上架')}</div>`;
+      return;
+    }
+    const p = r.json;
+    const user = getUser();
+    const isAdmin = user && user.role === 'admin';
+    const canSubmit = user;
+
+    const tcCount = Array.isArray(p.testcases) ? p.testcases.length : null;
+    const testcaseHint = tcCount !== null
+      ? `<p class="small muted" style="margin:0;">本题共 ${tcCount} 组测试数据，提交后逐组比对。</p>`
+      : `<p class="small muted" style="margin:0;">登录后可见测试数据组数。</p>`;
+
+    // 提交面板
+    let panel;
+    if (!user) {
+      panel = `
+        <div class="card">
+          <div class="eyebrow mb">SUBMIT</div>
+          <p class="small muted">登录后即可提交代码。游客可以浏览题面。</p>
+          <a class="btn btn-primary" href="/login.html?next=${encodeURIComponent(location.pathname + location.search)}" style="justify-content:center;">登录后提交</a>
+        </div>`;
+    } else if (p.isCommunication) {
+      let proto = {};
+      try { proto = typeof p.protocol === 'string' ? JSON.parse(p.protocol) : (p.protocol || {}); } catch (e) { proto = {}; }
+      const fn1 = proto.fn1 || 'Alice';
+      const fn2 = proto.fn2 || 'Bob';
+      panel = `
+        <div class="card">
+          <div class="eyebrow mb">SUBMIT</div>
+          <div class="notice" style="margin-bottom:10px;">通信题：请实现 ${esc(fn1)} 与 ${esc(fn2)} 两个函数（不要写 main），评测驱动会分两次独立运行调用。</div>
+          <textarea class="code-editor" id="code" spellcheck="false">${esc(localStorage.getItem('weboj_draft') || '')}</textarea>
+          <label class="check" style="margin-top:10px;">
+            <input type="checkbox" id="public-code" checked>
+            <span class="small">公开代码（他人可查看你的源代码与评测结果）</span>
+          </label>
+          <div class="form-err hidden mt" id="submit-err"></div>
+          <button class="btn btn-primary mt" id="submit-btn" style="width:100%;justify-content:center;">提交评测</button>
+          ${testcaseHint}
+        </div>`;
+    } else {
+      panel = `
+        <div class="card">
+          <div class="eyebrow mb">SUBMIT</div>
+          <div class="flex mb" style="justify-content:space-between;">
+            <span class="chip">C++</span>
+          </div>
+          <textarea class="code-editor" id="code" spellcheck="false">${esc(localStorage.getItem('weboj_draft') || '')}</textarea>
+          <label class="check" style="margin-top:10px;">
+            <input type="checkbox" id="public-code" checked>
+            <span class="small">公开代码（他人可查看你的源代码与评测结果）</span>
+          </label>
+          <div class="form-err hidden mt" id="submit-err"></div>
+          <button class="btn btn-primary mt" id="submit-btn" style="width:100%;justify-content:center;">提交评测</button>
+          ${testcaseHint}
+          <div class="run-panel">
+            <div class="eyebrow mb">RUN / TEST</div>
+            <label class="run-label" for="run-input">输入 stdin</label>
+            <textarea class="run-io" id="run-input" placeholder="自定义输入（可选，逐行）"></textarea>
+            <label class="run-label" for="run-expect">预期输出（可选）</label>
+            <textarea class="run-io" id="run-expect" placeholder="填写后，运行结果会与之自动比对"></textarea>
+            <button class="btn mt" id="run-btn" style="width:100%;justify-content:center;">运行代码</button>
+            <label class="run-label" for="run-output">实际输出</label>
+            <pre class="run-output" id="run-output">（尚未运行）</pre>
+            <div class="run-status" id="run-status"></div>
+          </div>
+        </div>`;
+    }
+
+    const solutionHtml = p.solution !== undefined && p.solution !== null
+      ? `
+        <div class="card">
+          <div class="eyebrow">题解</div>
+          <div class="statement mt">${esc(p.solution)}</div>
+        </div>`
+      : `
+        <div class="card">
+          <div class="eyebrow">题解</div>
+          <p class="small muted mt" style="margin:6px 0 0;">${user ? '本题题解暂未开放。' : '登录后查看题解。'}</p>
+        </div>`;
+
+    // 题面分模块渲染：题目背景 / 描述 / 输入格式 / 输出格式 / 样例 / 说明提示
+    function section(title, content) {
+      if (!content || !String(content).trim()) return '';
+      return `<div class="stmt-sec"><div class="stmt-sec-title">${esc(title)}</div><div class="statement">${esc(content)}</div></div>`;
+    }
+    const samplesArr = Array.isArray(p.samples) ? p.samples : [];
+    const samplesHtml = samplesArr.length
+      ? `<div class="stmt-sec">
+          <div class="stmt-sec-title">样例</div>
+          ${samplesArr.map((s, i) => `
+            <div class="sample">
+              <div class="sample-head">
+                <span class="sample-title">样例 ${i + 1}</span>
+                <span class="sample-actions">
+                  <button class="btn btn-sm sample-copy" type="button" data-index="${i}" data-kind="input">复制输入</button>
+                  <button class="btn btn-sm sample-copy" type="button" data-index="${i}" data-kind="output">复制输出</button>
+                  ${canSubmit ? `<button class="btn btn-sm btn-primary sample-run" type="button" data-index="${i}">运行</button>` : ''}
+                </span>
+              </div>
+              <div class="sample-io">
+                <div class="sample-block"><div class="sample-label">输入</div><pre>${esc(s.input)}</pre></div>
+                <div class="sample-block"><div class="sample-label">输出</div><pre>${esc(s.expectedOutput)}</pre></div>
+              </div>
+            </div>`).join('')}
+        </div>`
+      : '';
+    const statementHtml =
+      section('题目背景', p.background) +
+      section('题目描述', p.description) +
+      section('输入格式', p.inputFormat) +
+      section('输出格式', p.outputFormat) +
+      samplesHtml +
+      section('说明/提示', p.hint);
+
+    box.innerHTML = `
+      <div class="page-head">
+        <div class="eyebrow">PROBLEM ${String(p.id).padStart(4, '0')}</div>
+        <h1 class="page-title">${esc(p.title)}</h1>
+        <p class="page-sub">
+          <span class="chip">${esc(p.timeLimitMs)}ms</span>
+          <span class="chip">${esc(p.memoryLimitMb)}MB</span>
+          ${p.isCommunication ? '<span class="chip chip-comm">通信题</span>' : ''}
+          ${isAdmin && !p.isPublished ? '<span class="chip">已下架（仅管理员可见）</span>' : ''}
+        </p>
+      </div>
+      <div class="split">
+        <div>
+          <div class="card">
+            <div class="eyebrow">题目描述</div>
+            <div class="mt">${statementHtml}</div>
+          </div>
+        </div>
+        <div>
+          <div class="card side-nav" id="side-nav">
+            <button class="side-btn" data-panel="solution">题解</button>
+            <button class="side-btn" data-panel="submissions">提交记录</button>
+            <button class="side-btn active" data-panel="submit">提交评测</button>
+          </div>
+          <div id="panel-solution" class="hidden">${solutionHtml}</div>
+          <div id="panel-submissions" class="hidden">
+            <div class="card"><div class="empty">加载中…</div></div>
+          </div>
+          <div id="panel-submit">${panel}</div>
+        </div>
+      </div>`;
+
+    // 洛谷式侧栏：点击按键切换右栏面板（面板只隐藏不销毁，已输入的代码与草稿不丢）
+    const panelIds = { solution: 'panel-solution', submissions: 'panel-submissions', submit: 'panel-submit' };
+    let submissionsLoaded = false;
+    const sideBtns = box.querySelectorAll('#side-nav .side-btn');
+    function activatePanel(name) {
+      sideBtns.forEach((b) => b.classList.toggle('active', b.dataset.panel === name));
+      for (const key in panelIds) {
+        document.getElementById(panelIds[key]).classList.toggle('hidden', key !== name);
+      }
+      if (name === 'submissions' && !submissionsLoaded) {
+        submissionsLoaded = true;
+        loadSubmissions();
+      }
+    }
+    sideBtns.forEach((b) => b.addEventListener('click', () => activatePanel(b.dataset.panel)));
+
+    // 本题提交记录（右栏内嵌列表，首次点开时加载；已加载时随 WS 推送刷新）
+    async function loadSubmissions() {
+      const sb = document.getElementById('panel-submissions');
+      const r = await api('GET', '/api/submissions?problemId=' + p.id);
+      if (r.status !== 200) {
+        sb.innerHTML = `<div class="card"><div class="empty">加载失败：${esc(r.json && r.json.error || '未知错误')}</div></div>`;
+        return;
+      }
+      const rows = r.json;
+      if (!Array.isArray(rows) || !rows.length) {
+        sb.innerHTML = '<div class="card"><div class="empty">本题还没有提交记录。</div></div>';
+        return;
+      }
+      sb.innerHTML = `
+        <div class="card" style="padding:10px 12px;">
+          <table class="table">
+            <thead><tr><th>#</th><th>提交者</th><th>状态 / 判定</th><th>耗时</th><th>时间</th></tr></thead>
+            <tbody>
+              ${rows.map((s) => `
+                <tr>
+                  <td class="mono"><a href="/submission.html?id=${s.id}">#${s.id}</a></td>
+                  <td class="mono">${esc(s.username)}</td>
+                  <td>${s.verdict ? verdictBadge(s.verdict) : statusDot(s.status)}</td>
+                  <td class="mono small">${s.timeMs != null ? esc(s.timeMs) + 'ms' : '—'}</td>
+                  <td class="mono small">${esc(fmtTime(s.createdAt))}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    }
+    const ws = WOJ.openWs((msg) => {
+      if (msg.type === 'submission' && submissionsLoaded) loadSubmissions();
+    });
+
+    // 提交逻辑
+    const codeEl = document.getElementById('code');
+    const errEl = document.getElementById('submit-err');
+    if (codeEl) {
+      installCodeEditor(codeEl);
+      codeEl.addEventListener('input', () => localStorage.setItem('weboj_draft', codeEl.value));
+    }
+    const submitBtn = document.getElementById('submit-btn');
+    if (submitBtn) {
+      submitBtn.addEventListener('click', async () => {
+        const sourceCode = codeEl.value;
+        if (!sourceCode.trim()) {
+          errEl.textContent = '代码不能为空';
+          errEl.classList.remove('hidden');
+          return;
+        }
+        errEl.classList.add('hidden');
+        submitBtn.disabled = true;
+        submitBtn.textContent = '提交中…';
+        const publicEl = document.getElementById('public-code');
+        const r = await api('POST', '/api/submissions', {
+          problemId: p.id,
+          language: 'cpp',
+          sourceCode,
+          isPublic: publicEl && publicEl.checked ? 1 : 0,
+        });
+        submitBtn.disabled = false;
+        submitBtn.textContent = '提交评测';
+        if (r.status !== 201) {
+          errEl.textContent = r.json && r.json.error || '提交失败';
+          errEl.classList.remove('hidden');
+          return;
+        }
+        localStorage.removeItem('weboj_draft');
+        toast('已提交，浏览器内评测已启动');
+        location.href = '/submission.html?id=' + r.json.id;
+      });
+    }
+
+    // 自定义运行（「运行代码」：编译 + 对自定义输入单组运行，不产生提交记录）
+    const runBtn = document.getElementById('run-btn');
+    const runInputEl = document.getElementById('run-input');
+    const runExpectEl = document.getElementById('run-expect');
+    const runOutputEl = document.getElementById('run-output');
+    const runStatusEl = document.getElementById('run-status');
+    if (runBtn) {
+      function formatMem(kb) {
+        if (kb == null) return '';
+        return kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb + ' KB';
+      }
+      // 结果区：评测结果徽章 → 耗时 → 耗空间（顺序固定）
+      function setRunResult(verdict, timeMs, memoryKb) {
+        const badge = verdict
+          ? `<span class="verdict verdict-${esc(verdict)}">${esc(verdict)}</span>`
+          : '<span class="verdict verdict-none">运行完成</span>';
+        const time = timeMs != null ? `<span class="run-metric mono">${esc(timeMs)}ms</span>` : '';
+        const mem = `<span class="run-metric mono">${memoryKb != null ? esc(formatMem(memoryKb)) : '—'}</span>`;
+        runStatusEl.innerHTML = badge + time + mem;
+        runStatusEl.className = 'run-status';
+      }
+      let runWorker = null;
+      let running = false;
+      let timer = null;
+
+      function setRunStatus(html, cls) {
+        runStatusEl.innerHTML = html;
+        runStatusEl.className = 'run-status' + (cls ? ' ' + cls : '');
+      }
+      function setTimer(ms) {
+        clearTimeout(timer);
+        timer = setTimeout(onRunTimeout, ms);
+      }
+      function onRunTimeout() {
+        if (runWorker) { try { runWorker.terminate(); } catch (e) {} runWorker = null; }
+        running = false;
+        runBtn.disabled = false;
+        runBtn.textContent = '运行代码';
+        // TLE：耗时显示「> 题限」，内存因 worker 已被强杀而无法测量，显示 —
+        setRunResult('TLE', '>' + (p.timeLimitMs || 1000), null);
+      }
+
+      runBtn.addEventListener('click', () => {
+        if (running) return;
+        const src = codeEl.value;
+        if (!src.trim()) {
+          setRunStatus('请先输入代码', 'err');
+          return;
+        }
+        running = true;
+        runBtn.disabled = true;
+        runBtn.textContent = '编译运行中…';
+        runOutputEl.textContent = '';
+        setRunStatus('正在初始化工具链（首次较慢，之后走缓存）…', '');
+
+        if (!runWorker) {
+          try {
+            runWorker = new Worker('/js/judge-worker.js', { type: 'module' });
+          } catch (e) {
+            running = false;
+            runBtn.disabled = false;
+            runBtn.textContent = '运行代码';
+            setRunStatus('浏览器不支持评测 Worker', 'err');
+            return;
+          }
+        }
+        const w = runWorker;
+        const timeLimitMs = p.timeLimitMs || 1000;
+        setTimer(180000); // 初始化上限
+
+        w.onmessage = (e) => {
+          const m = e.data || {};
+          switch (m.type) {
+            case 'run-compile-start':
+              setRunStatus('编译中…', '');
+              setTimer(90000);
+              break;
+            case 'run-compile-error':
+              clearTimeout(timer);
+              running = false;
+              runBtn.disabled = false;
+              runBtn.textContent = '运行代码';
+              runOutputEl.textContent = m.stderr || '编译失败';
+              setRunStatus('编译错误（CE）', 'err');
+              break;
+            case 'run-start':
+              setRunStatus('运行中…', '');
+              setTimer(timeLimitMs + 3000);
+              break;
+            case 'run-done': {
+              clearTimeout(timer);
+              running = false;
+              runBtn.disabled = false;
+              runBtn.textContent = '运行代码';
+              const stdout = m.stdout || '';
+              const stderr = m.stderr || '';
+              runOutputEl.textContent = stdout + (stderr ? '\n\n[stderr]\n' + stderr : '');
+              setRunResult(m.verdict, m.timeMs, m.memoryKb);
+              break;
+            }
+            case 'run-error':
+              clearTimeout(timer);
+              running = false;
+              runBtn.disabled = false;
+              runBtn.textContent = '运行代码';
+              setRunStatus('运行异常：' + (m.message || '未知错误'), 'err');
+              break;
+          }
+        };
+        w.onerror = (e) => {
+          clearTimeout(timer);
+          running = false;
+          runBtn.disabled = false;
+          runBtn.textContent = '运行代码';
+          setRunStatus('Worker 异常：' + (e.message || '未知错误'), 'err');
+        };
+
+        w.postMessage({
+          type: 'run',
+          task: {
+            sourceCode: src,
+            input: runInputEl.value,
+            expectedOutput: runExpectEl.value,
+            timeLimitMs,
+            memoryLimitMb: p.memoryLimitMb || 64,
+          },
+        });
+      });
+    }
+
+    // 样例：复制 + 运行（运行按钮把样例输入/输出填入运行面板并触发运行）
+    box.querySelectorAll('.sample-copy').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const s = samplesArr[Number(btn.dataset.index)];
+        if (!s) return;
+        const text = btn.dataset.kind === 'input' ? s.input : s.expectedOutput;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+          }
+          toast('已复制');
+        } catch (e) {
+          toast('复制失败', 'err');
+        }
+      });
+    });
+    box.querySelectorAll('.sample-run').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const s = samplesArr[Number(btn.dataset.index)];
+        if (!s) return;
+        const ri = document.getElementById('run-input');
+        const re = document.getElementById('run-expect');
+        if (ri) ri.value = s.input;
+        if (re) re.value = s.expectedOutput;
+        const rb = document.getElementById('run-btn');
+        if (rb) rb.click();
+      });
+    });
+  }
+</script>
+</body>
+</html>

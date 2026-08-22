@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>后台 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap">
+  <div class="page-head">
+    <div class="eyebrow">ADMIN</div>
+    <h1 class="page-title">管理后台</h1>
+    <p class="page-sub">题目发布与上下架、测试数据绑定、用户角色管理。</p>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="problems">题目管理</button>
+    <button class="tab" data-tab="users">用户管理</button>
+    <button class="tab" data-tab="subs">提交总览</button>
+  </div>
+
+  <!-- 题目管理 -->
+  <section id="tab-problems">
+    <div class="flex mb" style="justify-content:space-between;">
+      <span class="small muted" id="problem-count"></span>
+      <button class="btn btn-primary" id="new-problem">+ 发布题目</button>
+    </div>
+
+    <div class="card hidden" id="problem-form">
+      <div class="eyebrow" id="form-title">发布题目</div>
+      <div class="split" style="grid-template-columns:1fr 1fr;margin-top:12px;">
+        <div>
+          <div class="field">
+            <label>标题</label>
+            <input type="text" id="f-title" maxlength="200">
+          </div>
+          <div class="field">
+            <label>题目背景（可选）</label>
+            <textarea id="f-bg" rows="2" style="font-family:var(--font-sans);"></textarea>
+          </div>
+          <div class="field">
+            <label>题目描述</label>
+            <textarea id="f-desc" rows="5" style="font-family:var(--font-sans);"></textarea>
+          </div>
+          <div class="field">
+            <label>输入格式</label>
+            <textarea id="f-input-format" rows="2" style="font-family:var(--font-sans);"></textarea>
+          </div>
+          <div class="field">
+            <label>输出格式</label>
+            <textarea id="f-output-format" rows="2" style="font-family:var(--font-sans);"></textarea>
+          </div>
+          <div class="field">
+            <label>说明/提示（可选）</label>
+            <textarea id="f-hint" rows="2" style="font-family:var(--font-sans);"></textarea>
+          </div>
+          <div class="field">
+            <label>题解（隐藏区内容）</label>
+            <textarea id="f-solution" rows="4" style="font-family:var(--font-sans);"></textarea>
+          </div>
+        </div>
+        <div>
+          <div class="flex" style="gap:14px;">
+            <div class="field" style="flex:1;">
+              <label>时限（ms）</label>
+              <input type="number" id="f-time" value="1000" min="1" max="60000">
+            </div>
+            <div class="field" style="flex:1;">
+              <label>内存（MB）</label>
+              <input type="number" id="f-mem" value="64" min="1" max="4096">
+            </div>
+          </div>
+          <div class="flex" style="gap:18px;margin:6px 0 14px;">
+            <label class="check"><input type="checkbox" id="f-sol-visible"> 题解对会员可见</label>
+            <label class="check"><input type="checkbox" id="f-published" checked> 上架</label>
+            <label class="check"><input type="checkbox" id="f-comm"> 通信题</label>
+          </div>
+          <div class="field">
+            <label>协议配置（JSON，通信题）</label>
+            <textarea id="f-protocol" rows="2" placeholder='{"driver":"two-phase","fn1":"Alice","fn2":"Bob","xMax":1048575}'></textarea>
+            <div class="hint">两进程函数式通信题的协议参数：两个函数名、中间值上限等。非通信题可留空。</div>
+          </div>
+          <div class="field">
+            <label>样例（题面公开可见，可留空）</label>
+            <div id="sample-rows"></div>
+            <button class="btn btn-sm" id="sample-add" type="button">+ 添加样例</button>
+          </div>
+          <div class="field">
+            <label>测试数据（评测用，至少 3 组）</label>
+            <div id="tc-rows"></div>
+            <button class="btn btn-sm" id="tc-add" type="button">+ 添加一组</button>
+          </div>
+          <div class="form-err hidden" id="form-err"></div>
+          <div class="flex">
+            <button class="btn btn-primary" id="form-save">保存</button>
+            <button class="btn" id="form-cancel">取消</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="problem-list"><div class="empty">加载中…</div></div>
+  </section>
+
+  <!-- 用户管理 -->
+  <section id="tab-users" class="hidden">
+    <div class="card" id="user-list"><div class="empty">加载中…</div></div>
+  </section>
+
+  <!-- 提交总览 -->
+  <section id="tab-subs" class="hidden">
+    <div class="card" id="sub-list"><div class="empty">加载中…</div></div>
+  </section>
+</main>
+
+<script src="/js/api.js"></script>
+<script src="/js/admin.js"></script>
+</body>
+</html>

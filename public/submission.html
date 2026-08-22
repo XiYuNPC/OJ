@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>提交详情 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap">
+  <div id="content"><div class="empty">加载中…</div></div>
+</main>
+
+<script src="/js/api.js"></script>
+<script src="/js/judge.js"></script>
+<script src="/js/code-editor.js"></script>
+<script>
+  const { api, esc, qs, renderNav, toast, fmtTime, verdictBadge, statusDot } = WOJ;
+  renderNav('submissions');
+
+  const id = Number(qs('id'));
+  if (!id) {
+    document.getElementById('content').innerHTML = '<div class="empty">缺少提交编号</div>';
+  } else {
+    load();
+  }
+
+  let lastStatus = null;
+  let cur = null;  // 当前提交数据（评测中实时渲染用）
+  let live = null; // 实时评测进度 { rows:[{ordinal,ok,actualOutput}], ordinal, total }
+
+  function caseRow(c, i) {
+    const ok = !!c.ok;
+    const cls = ok ? 'ok' : 'bad';
+    const mark = ok ? 'OK ' : 'BAD';
+    return `<div class="case-row">
+      <span class="case-no">case ${String(c.ordinal != null ? c.ordinal : i + 1).padStart(2, '0')}</span>
+      <span class="${cls}">[${mark}]</span>
+      ${c.input !== undefined ? `<span class="t-dim">in: ${esc(String(c.input).trim())}</span>` : ''}
+      ${c.expectedOutput !== undefined ? `<span class="${ok ? 't-dim' : 't-ac'}">expect: ${esc(String(c.expectedOutput).trim())}</span>` : ''}
+      ${c.actualOutput !== undefined ? `<span class="${ok ? 't-dim' : 't-wa'}">actual: ${esc(String(c.actualOutput).trim())}</span>` : ''}
+    </div>`;
+  }
+
+  // 渲染终端日志卡（live：评测中的即时进度，由 judge.js 事件驱动）
+  function termLog(s, live) {
+    const judging = s.status === 'judging';
+    const done = s.status === 'done';
+    const cursor = judging || s.status === 'pending' ? '<span class="cursor"></span>' : '';
+    const verdictLine = done
+      ? `<div class="case-row"><span class="case-no">verdict</span><span class="${s.verdict === 'AC' ? 't-ac' : s.verdict === 'CE' ? 't-dim' : 't-wa'}">${esc(s.verdict)}</span></div>`
+      : `<div class="case-row"><span class="case-no">verdict</span><span class="t-dim">—</span></div>`;
+    const resLine =
+      s.timeMs != null || s.memoryKb != null
+        ? `<div class="case-row"><span class="case-no">cost</span><span class="t-dim">${s.timeMs != null ? esc(s.timeMs) + 'ms' : '—'} / ${s.memoryKb != null ? esc(s.memoryKb) + 'KB' : '—'}（近似值）</span></div>`
+        : '';
+
+    let detailHtml = '';
+    if (Array.isArray(s.details)) {
+      detailHtml = s.details.map((c, i) => caseRow(c, i)).join('');
+    } else if (typeof s.details === 'string' && s.details) {
+      detailHtml = `<div class="case-row"><span class="case-no">log</span><span class="t-err">${esc(s.details)}</span></div>`;
+    } else if (s.details && typeof s.details === 'object') {
+      detailHtml = `<div class="case-row"><span class="case-no">log</span><span class="t-err">${esc(JSON.stringify(s.details))}</span></div>`;
+    } else if (!done && live && live.rows.length) {
+      detailHtml = live.rows.map((c, i) => caseRow(c, i)).join('') +
+        `<div class="case-row"><span class="case-no">case ${String(live.ordinal != null ? live.ordinal : '??').padStart(2, '0')}</span><span class="t-judging">正在评测…</span></div>`;
+    }
+    if (!detailHtml && !done) {
+      detailHtml = `<div class="case-row"><span class="case-no">log</span><span class="t-dim">等待评测结果…</span></div>`;
+    }
+
+    return `
+      <div class="term">
+        <div><span class="cmd">$</span> weboj judge submission <span class="t-ac">#${s.id}</span>${cursor}</div>
+        <div class="mt" style="margin-top:8px;">
+          <div class="case-row"><span class="case-no">status</span><span class="${done ? 't-ac' : judging ? 't-judging' : 't-dim'}">${esc(WOJ.statusText(s.status))}</span></div>
+          ${verdictLine}
+          ${resLine}
+        </div>
+        ${detailHtml ? `<div class="mt" style="margin-top:8px;">${detailHtml}</div>` : ''}
+      </div>`;
+  }
+
+  async function load() {
+    const r = await api('GET', '/api/submissions/' + id);
+    const box = document.getElementById('content');
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">${esc(r.json && r.json.error || '提交不存在或无权查看')}</div>`;
+      return;
+    }
+    const s = r.json;
+    lastStatus = s.status;
+    cur = s;
+    document.title = `#${s.id} · 提交详情 · WebOJ`;
+
+    box.innerHTML = `
+      <div class="page-head">
+        <div class="eyebrow">SUBMISSION #${s.id}</div>
+        <h1 class="page-title">
+          <a href="/problem.html?id=${s.problemId}">${esc(s.problemTitle)}</a>
+          <span class="muted small" style="margin-left:8px;">by ${esc(s.username)}</span>
+        </h1>
+        <p class="page-sub">${esc(fmtTime(s.createdAt))} · ${statusDot(s.status)}</p>
+      </div>
+
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;">
+          <span class="eyebrow">判定结果</span>
+          ${verdictBadge(s.verdict)}
+        </div>
+        <div style="padding:16px 20px;" id="termbox">${termLog(s)}</div>
+      </div>
+
+      <div class="card">
+        <div class="flex" style="justify-content:space-between;align-items:center;">
+          <div class="eyebrow">源代码（${esc(s.language)}）</div>
+          ${s.sourceCode == null ? '' : '<button class="btn btn-sm" id="copy-code">复制代码</button>'}
+        </div>
+        ${s.sourceCode == null
+          ? '<p class="small muted" style="margin:8px 0 0;">代码未公开 —— 提交者未开启代码公开，仅评测结果可见。</p>'
+          : `<pre class="term mt" style="margin-top:10px;white-space:pre-wrap;word-break:break-word;">${highlightCpp(s.sourceCode)}</pre>`}
+      </div>
+      <p class="small muted" style="text-align:center;">
+        <a href="/submissions.html">← 返回提交记录</a>
+      </p>`;
+
+    // 一键复制源代码（剪贴板 API 优先，非安全上下文/被拒时用临时 textarea 兜底）
+    const copyBtn = document.getElementById('copy-code');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', async () => {
+        let ok = false;
+        if (navigator.clipboard && window.isSecureContext) {
+          try { await navigator.clipboard.writeText(s.sourceCode); ok = true; } catch (e) { /* 落兜底 */ }
+        }
+        if (!ok) {
+          const ta = document.createElement('textarea');
+          ta.value = s.sourceCode;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          try { ok = document.execCommand('copy'); } catch (e) { /* 忽略 */ }
+          ta.remove();
+        }
+        copyBtn.textContent = ok ? '已复制' : '复制失败';
+        setTimeout(() => { copyBtn.textContent = '复制代码'; }, 1200);
+      });
+    }
+
+    // 未完成：WS 推送优先，断线时轮询兜底
+    if (s.status !== 'done') {
+      startWatch();
+    }
+    // 本人提交且未完成：启动浏览器内评测（认领失败如已评测/无权会静默跳过）
+    const me = WOJ.getUser();
+    if (me && s.username === me.username && s.status !== 'done') {
+      WOJJudge.judge(id);
+    }
+  }
+
+  // 浏览器内评测的实时反馈（judge.js 事件）
+  function rerender() {
+    const el = document.getElementById('termbox');
+    if (el && cur) el.innerHTML = termLog(cur, live);
+  }
+  document.addEventListener('weboj-judge-start', (e) => {
+    if (e.detail.submissionId !== id || !cur || cur.status === 'done') return;
+    cur.status = 'judging';
+    live = { rows: [], ordinal: 1, total: 1 };
+    rerender();
+  });
+  document.addEventListener('weboj-judge-progress', (e) => {
+    const d = e.detail;
+    if (d.submissionId !== id || !cur || cur.status === 'done') return;
+    if (d.phase === 'case-start') {
+      live = { rows: live ? live.rows : [], ordinal: d.ordinal, total: d.total };
+    } else if (d.phase === 'case-done') {
+      live.rows.push({ ordinal: d.ordinal, ok: d.ok, actualOutput: d.actualOutput });
+    }
+    rerender();
+  });
+  document.addEventListener('weboj-judge-done', (e) => {
+    if (e.detail.submissionId !== id) return;
+    if (e.detail.error) toast('评测中断：' + e.detail.error + '（可刷新页面重试）', 'err');
+    load();
+  });
+
+  let ws = null;
+  let watchStarted = false;
+  function startWatch() {
+    if (watchStarted) return;
+    watchStarted = true;
+    ws = WOJ.openWs((msg) => {
+      if (msg.type === 'submission' && msg.submissionId === id) load();
+    });
+    if (!ws) {
+      // WS 不可用：2 秒轮询，直到 done
+      const timer = setInterval(async () => {
+        const r = await api('GET', '/api/submissions/' + id);
+        if (r.status === 200) {
+          load();
+          if (r.json.status === 'done') clearInterval(timer);
+        }
+      }, 2000);
+    }
+  }
+
+  load().catch((e) => toast('加载失败：' + e.message, 'err'));
+</script>
+</body>
+</html>

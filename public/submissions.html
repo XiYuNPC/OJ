@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>提交记录 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap">
+  <div class="page-head">
+    <div class="eyebrow">SUBMISSIONS</div>
+    <h1 class="page-title">提交记录</h1>
+    <p class="page-sub">评测状态通过 WebSocket 实时推送，无需刷新页面。</p>
+  </div>
+  <div class="card" id="box"><div class="empty">加载中…</div></div>
+</main>
+
+<script src="/js/api.js"></script>
+<script src="/js/judge.js"></script>
+<script>
+  const { api, esc, qs, renderNav, toast, fmtTime, verdictBadge, statusText } = WOJ;
+  renderNav('submissions');
+
+  // 题目过滤模式：/submissions.html?problemId=N 展示某题的全部提交
+  const problemId = qs('problemId');
+  const filtered = Number(problemId) > 0 ? Number(problemId) : null;
+
+  const headEl = document.querySelector('.page-head');
+  if (filtered) {
+    headEl.innerHTML = `
+      <div class="eyebrow">SUBMISSIONS</div>
+      <h1 class="page-title">本题提交记录</h1>
+      <p class="page-sub">展示所有提交者在本题的提交，按时间倒序。<a href="/problem.html?id=${filtered}">← 返回题目</a></p>`;
+  } else {
+    headEl.innerHTML = `
+      <div class="eyebrow">SUBMISSIONS</div>
+      <h1 class="page-title">提交记录</h1>
+      <p class="page-sub">所有题目、所有提交者的提交，按时间倒序。评测状态通过 WebSocket 实时推送，无需刷新页面。</p>`;
+  }
+
+  async function load() {
+    const r = await api('GET', '/api/submissions' + (filtered ? '?problemId=' + filtered : ''));
+    const box = document.getElementById('box');
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">加载失败：${esc(r.json && r.json.error || '未知错误')}</div>`;
+      return;
+    }
+    const rows = r.json;
+    if (!rows.length) {
+      box.innerHTML = '<div class="empty">还没有提交记录。去<a href="/">题库</a>挑一道题试试。</div>';
+      return;
+    }
+    box.innerHTML = `
+      <table class="table">
+        <thead><tr>
+          <th>#</th><th>题目</th><th>提交者</th><th>语言</th><th>状态</th><th>判定</th><th>耗时 / 内存</th><th>提交时间</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map((s) => `
+            <tr>
+              <td class="mono"><a href="/submission.html?id=${s.id}">#${s.id}</a></td>
+              <td><a href="/problem.html?id=${s.problemId}">${esc(s.problemTitle)}</a></td>
+              <td class="mono">${esc(s.username)}</td>
+              <td class="mono small">${esc(s.language)}</td>
+              <td>${esc(statusText(s.status))}</td>
+              <td>${verdictBadge(s.verdict)}</td>
+              <td class="mono small">${s.timeMs != null ? esc(s.timeMs) + 'ms / ' + esc(s.memoryKb) + 'KB' : '—'}</td>
+              <td class="mono small">${esc(fmtTime(s.createdAt))}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    // 自动认领本人待评测/评测中的提交（串行评测；认领失败会静默跳过）
+    const me = WOJ.getUser();
+    if (me) {
+      rows
+        .filter((r) => r.username === me.username && (r.status === 'pending' || r.status === 'judging'))
+        .forEach((r) => WOJJudge.judge(r.id));
+    }
+  }
+
+  // 浏览器内评测完成：立即刷新（WS 推送亦会触发，此处为本地即时反馈）
+  document.addEventListener('weboj-judge-done', () => load());
+
+  // 实时：收到推送就刷新列表（游客未登录无 WS，不提示）
+  const ws = WOJ.openWs((msg) => {
+    if (msg.type === 'submission') load();
+  });
+  if (!ws && WOJ.getUser()) toast('未连接实时推送，可手动刷新查看状态', 'err');
+
+  load().catch((e) => toast('加载失败：' + e.message, 'err'));
+</script>
+</body>
+</html>
