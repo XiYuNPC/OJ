@@ -21,3 +21,7 @@ undefined*
 
 # IDE / 工具数据
 .codebuddy/
+
+# 文档：仅接口文档 docs/api.md 随代码入库，立项书/各天报告/设计文档/模块图仅本地保留
+docs/*
+!docs/api.md

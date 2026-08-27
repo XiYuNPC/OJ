@@ -7,7 +7,12 @@
   "scripts": {
     "start": "node server/index.js",
     "seed": "node scripts/seed.js",
-    "test": "node scripts/test.js"
+    "test": "node scripts/test.js",
+    "stress": "node scripts/stress.js",
+    "harness": "node scripts/harness-check.js",
+    "verify-p6838": "node scripts/verify-p6838.js",
+    "realdata": "node scripts/realdata-check.js",
+    "daemon": "node scripts/judge-daemon.js"
   },
   "engines": {
     "node": ">=23.4"
