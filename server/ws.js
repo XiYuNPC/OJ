@@ -48,4 +48,11 @@ function push(submissionId, payload) {
   for (const ws of adminSockets) if (ws.readyState === 1) ws.send(data);
 }
 
-module.exports = { init, push };
+// 广播给所有在线登录用户（比赛榜单更新等全局事件）
+function broadcast(message) {
+  const data = JSON.stringify(message);
+  for (const set of memberSockets.values()) for (const ws of set) if (ws.readyState === 1) ws.send(data);
+  for (const ws of adminSockets) if (ws.readyState === 1) ws.send(data);
+}
+
+module.exports = { init, push, broadcast };

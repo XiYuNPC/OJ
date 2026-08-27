@@ -40,6 +40,10 @@ function finishSubmission(submissionId, verdict, details, timeMs, memoryKb) {
     submissionId
   );
   ws.push(submissionId, { userId: sub.user_id, status: 'done', verdict });
+  // 比赛内提交：广播榜单更新事件，榜单页据此刷新
+  if (sub.contest_id != null) {
+    ws.broadcast({ type: 'contest-scoreboard', contestId: sub.contest_id, submissionId });
+  }
   return { status: 200, body: { ok: true, submissionId, status: 'done', verdict } };
 }
 
@@ -55,19 +59,30 @@ function checkJudgeKey(req, res) {
 }
 
 // GET /api/judge/tasks  任务拉取：返回最早一个待评测任务（含测试数据）
+// 可选 ?language=c,python,java（逗号分隔）按语言过滤——多语言后端评测机用它只拉非浏览器语言（cpp）
 router.get('/tasks', (req, res) => {
   const denied = checkJudgeKey(req, res);
   if (denied) return denied;
 
+  let langs = null;
+  if (req.query.language) {
+    langs = String(req.query.language).split(',').map((s) => s.trim()).filter(Boolean);
+  }
+
   const task = db.tx(() => {
-    const row = db
-      .prepare(
-        `SELECT s.id, s.problem_id AS problemId, s.language, s.source_code AS sourceCode,
-                p.is_communication AS isCommunication, p.protocol
-         FROM submissions s JOIN problems p ON p.id = s.problem_id
-         WHERE s.status = 'pending' ORDER BY s.id ASC LIMIT 1`
-      )
-      .get();
+    let sql =
+      `SELECT s.id, s.problem_id AS problemId, s.language, s.source_code AS sourceCode,
+              p.is_communication AS isCommunication, p.protocol,
+              p.time_limit_ms AS timeLimitMs, p.memory_limit_mb AS memoryLimitMb
+       FROM submissions s JOIN problems p ON p.id = s.problem_id
+       WHERE s.status = 'pending'`;
+    const params = [];
+    if (langs && langs.length) {
+      sql += ` AND s.language IN (${langs.map(() => '?').join(',')})`;
+      params.push(...langs);
+    }
+    sql += ' ORDER BY s.id ASC LIMIT 1';
+    const row = db.prepare(sql).get(...params);
     if (!row) return null;
     db.prepare(`UPDATE submissions SET status = 'judging' WHERE id = ?`).run(row.id);
     return row;
@@ -117,6 +132,9 @@ router.post('/self/claim', ...selfAuth, (req, res) => {
   if (!sub) return res.status(404).json({ error: '提交不存在' });
   if (sub.userId !== req.user.id) return res.status(403).json({ error: '只能认领本人的提交' });
   if (sub.status === 'done') return res.status(400).json({ error: '该提交已评测完成' });
+  if (sub.language !== 'cpp') {
+    return res.status(400).json({ error: `语言 ${sub.language} 由后端评测机处理，浏览器内实时编译仅支持 C++（cpp）` });
+  }
 
   if (sub.status === 'pending') {
     const claimed = db

@@ -3,9 +3,11 @@ const path = require('path');
 const express = require('express');
 const auth = require('./routes/auth');
 const problems = require('./routes/problems');
+const contests = require('./routes/contests');
 const submissions = require('./routes/submissions');
 const judge = require('./routes/judge');
 const admin = require('./routes/admin');
+const users = require('./routes/users');
 const docs = require('./routes/docs');
 
 const app = express();
@@ -24,9 +26,11 @@ app.use('/vendor/emception', express.static(path.join(__dirname, '..', 'node_mod
 
 app.use('/api/auth', auth);
 app.use('/api/problems', problems);
+app.use('/api/contests', contests);
 app.use('/api/submissions', submissions);
 app.use('/api/judge', judge);
 app.use('/api/admin', admin);
+app.use('/api/users', users);
 app.use('/api/docs', docs);
 
 // 统一 404 与错误处理

@@ -21,6 +21,90 @@ const COLUMN = {
   hint: 'hint',
 };
 
+// 通信题协议类型菜单（与 public/js/judge-worker.js 的 PARAM_TYPES / RET_TYPES 保持一致）
+const PROTO_PARAM_TYPES = new Set(['string', 'int', 'long long', 'vector<int>']);
+const PROTO_RET_TYPES = new Set(['string', 'int', 'long long']);
+
+function isProtoName(v) {
+  return typeof v === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(v);
+}
+function isNonNegativeInteger(v) {
+  return (typeof v === 'number' && Number.isInteger(v) && v >= 0) || (typeof v === 'string' && /^\d+$/.test(v));
+}
+
+// 归一化单个函数签名：字符串（旧式，走默认签名）或对象 { name, params, ret }（新式）
+function normalizeProtoFn(v, key, defName, defParams, defRet, defXParam) {
+  if (v === undefined || v === null) return { name: defName, params: defParams, ret: defRet, xParam: defXParam };
+  if (typeof v === 'string') {
+    if (!isProtoName(v)) return { error: `${key} 需为合法函数名或签名对象` };
+    return { name: v, params: defParams, ret: defRet, xParam: defXParam };
+  }
+  if (typeof v !== 'object' || Array.isArray(v)) return { error: `${key} 需为函数名字符串或签名对象` };
+  if (!isProtoName(v.name)) return { error: `${key}.name 需为合法函数名` };
+  if (!Array.isArray(v.params) || v.params.length === 0) return { error: `${key}.params 需为非空类型数组` };
+  for (const t of v.params) {
+    if (!PROTO_PARAM_TYPES.has(t)) return { error: `${key}.params 含不支持的类型：${t}` };
+  }
+  if (!PROTO_RET_TYPES.has(v.ret)) return { error: `${key}.ret 需为 ${[...PROTO_RET_TYPES].join(' / ')} 之一` };
+  return { name: v.name, params: v.params, ret: v.ret, xParam: Number.isInteger(v.xParam) ? v.xParam : defXParam };
+}
+
+// 协议结构校验：合法返回 { ok: true }，非法返回 { error }
+function validateProtocol(protocol) {
+  let obj;
+  try {
+    obj = JSON.parse(protocol);
+  } catch (e) {
+    return { error: '协议配置需为合法 JSON' };
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { error: '协议配置需为 JSON 对象' };
+  const driver = obj.driver || 'two-phase';
+  if (!['two-phase', 'stations'].includes(driver)) return { error: '协议 driver 需为 two-phase 或 stations' };
+
+  if (driver === 'stations') {
+    for (const k of ['fn1', 'fn2']) {
+      if (!isProtoName(obj[k])) return { error: `stations 协议 ${k} 需为合法函数名字符串` };
+    }
+    return { ok: true };
+  }
+
+  // two-phase：默认签名 fn1(string)→int、fn2(string,int)→int（X 为第二参）
+  const fn1 = normalizeProtoFn(obj.fn1, 'fn1', 'Alice', ['string'], 'int');
+  if (fn1.error) return fn1;
+  const fn2 = normalizeProtoFn(obj.fn2, 'fn2', 'Bob', ['string', 'int'], 'int', 1);
+  if (fn2.error) return fn2;
+  if (fn2.xParam < 0 || fn2.xParam >= fn2.params.length) {
+    return { error: 'fn2.xParam 需为 fn2.params 的有效下标' };
+  }
+  if (fn2.params[fn2.xParam] !== fn1.ret) {
+    return { error: `fn2.params[${fn2.xParam}] 的类型需与 fn1 返回类型一致（${fn1.ret}）` };
+  }
+  if (obj.xMax !== undefined && !isNonNegativeInteger(obj.xMax)) return { error: 'xMax 需为非负整数' };
+  if (obj.maxIntermediateBytes !== undefined && !isNonNegativeInteger(obj.maxIntermediateBytes)) {
+    return { error: 'maxIntermediateBytes 需为非负整数' };
+  }
+  if (obj.mutate !== undefined) {
+    if (!obj.mutate || typeof obj.mutate !== 'object' || Array.isArray(obj.mutate)) {
+      return { error: 'mutate 需为对象' };
+    }
+    if (fn1.ret !== 'string') return { error: 'mutate 要求 fn1 返回类型为 string' };
+    const m = obj.mutate;
+    if (m.type === 'noise-num') {
+      if (!(typeof m.ratio === 'number' && m.ratio > 0 && m.ratio <= 1)) return { error: 'mutate.ratio 需为 (0,1] 的数字' };
+      if (!Number.isInteger(m.seed)) return { error: 'mutate.seed 需为整数' };
+      if (!isNonNegativeInteger(m.min) || !isNonNegativeInteger(m.max)) return { error: 'mutate.min / mutate.max 需为非负整数' };
+      if (Number(m.min) > Number(m.max)) return { error: 'mutate.min 需不大于 mutate.max' };
+    } else if (m.type === 'delete-edges') {
+      if (!(Number.isInteger(m.delete) && m.delete >= 1)) return { error: 'mutate.delete 需为 ≥1 的整数' };
+      if (!Number.isInteger(m.seed)) return { error: 'mutate.seed 需为整数' };
+      if (m.meta !== undefined && !isNonNegativeInteger(m.meta)) return { error: 'mutate.meta 需为非负整数' };
+    } else {
+      return { error: "mutate.type 需为 'noise-num' 或 'delete-edges'" };
+    }
+  }
+  return { ok: true };
+}
+
 // 解析并校验题目表单；返回 {error} 或 {fields, testcases}（fields 的键为数据库列名）
 function parseProblemBody(body, { partial = false } = {}) {
   const fields = {};
@@ -64,7 +148,12 @@ function parseProblemBody(body, { partial = false } = {}) {
     if (body.protocol !== undefined && body.protocol !== null && typeof body.protocol !== 'string') {
       return { error: '协议配置 protocol 需为 JSON 字符串或 null' };
     }
-    fields.protocol = body.protocol ?? null;
+    const proto = body.protocol ?? null;
+    if (proto !== null && proto !== '') {
+      const v = validateProtocol(proto);
+      if (v.error) return { error: v.error };
+    }
+    fields.protocol = proto;
   }
   for (const k of ['background', 'inputFormat', 'outputFormat', 'hint']) {
     if (!partial || body[k] !== undefined) {
@@ -165,12 +254,36 @@ router.post('/', requireRole('admin'), (req, res) => {
 });
 
 // GET /api/problems  题目列表（游客/会员看已上架，管理员看全部）
+// 登录用户额外附 status：'solved'（有 AC）/ 'attempted'（提交过但未 AC）/ null（未做过）
 router.get('/', optionalAuth, (req, res) => {
   const isAdmin = req.user && req.user.role === 'admin';
   const rows = isAdmin
     ? db.prepare(`SELECT ${PUBLISHED_FIELDS} FROM problems ORDER BY id DESC`).all()
     : db.prepare(`SELECT ${PUBLISHED_FIELDS} FROM problems WHERE is_published = 1 ORDER BY id DESC`).all();
-  res.json(rows.map((r) => rowToProblem(r)));
+
+  // 当前用户做题状态映射（未登录为 null，不附加 status 字段）
+  let statusOf = null;
+  if (req.user) {
+    statusOf = {};
+    const solved = new Set(
+      db
+        .prepare("SELECT DISTINCT problem_id AS pid FROM submissions WHERE user_id = ? AND verdict = 'AC'")
+        .all(req.user.id)
+        .map((r) => r.pid)
+    );
+    const tried = db
+      .prepare('SELECT DISTINCT problem_id AS pid FROM submissions WHERE user_id = ?')
+      .all(req.user.id);
+    for (const r of tried) statusOf[r.pid] = solved.has(r.pid) ? 'solved' : 'attempted';
+  }
+
+  res.json(
+    rows.map((r) => {
+      const p = rowToProblem(r);
+      if (statusOf) p.status = statusOf[r.id] || null;
+      return p;
+    })
+  );
 });
 
 // GET /api/problems/:id  题目详情

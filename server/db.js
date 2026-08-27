@@ -62,6 +62,34 @@ CREATE TABLE IF NOT EXISTS submissions (
   judged_at   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS contests (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  title       TEXT    NOT NULL,
+  description TEXT    NOT NULL DEFAULT '',
+  start_time  TEXT    NOT NULL,               -- 开始时间（UTC，YYYY-MM-DD HH:MM:SS）
+  end_time    TEXT    NOT NULL,               -- 结束时间（UTC）
+  is_public   INTEGER NOT NULL DEFAULT 1,     -- 1 公开（游客可见）0 隐藏（仅管理员可见）
+  freeze_time TEXT,                           -- 封榜时间（UTC，可空；null=不封榜，封榜后提交冻结、赛后滚榜逐条揭晓）
+  created_by  INTEGER REFERENCES users(id),
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS contest_problems (
+  contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+  problem_id INTEGER NOT NULL REFERENCES problems(id),
+  ordinal    INTEGER NOT NULL,                -- 赛题顺序（从 1 起）
+  PRIMARY KEY (contest_id, problem_id)
+);
+
+CREATE TABLE IF NOT EXISTS contest_announcements (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+  title      TEXT    NOT NULL,
+  content    TEXT    NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status, id);
 CREATE INDEX IF NOT EXISTS idx_testcases_problem ON testcases(problem_id, ordinal);
 `);
@@ -90,6 +118,19 @@ for (const col of ['background', 'input_format', 'output_format', 'hint']) {
 const tcCols = db.prepare('PRAGMA table_info(testcases)').all();
 if (!tcCols.some((c) => c.name === 'is_sample')) {
   db.exec('ALTER TABLE testcases ADD COLUMN is_sample INTEGER NOT NULL DEFAULT 0');
+}
+
+// 已有库迁移：submissions 加 contest_id（比赛内提交标记，NULL=非比赛提交；不加外键，删比赛不级联删提交）
+const subCols2 = db.prepare('PRAGMA table_info(submissions)').all();
+if (!subCols2.some((c) => c.name === 'contest_id')) {
+  db.exec('ALTER TABLE submissions ADD COLUMN contest_id INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_submissions_contest ON submissions(contest_id, id)');
+}
+
+// 已有库迁移：contests 加 freeze_time（封榜时间，UTC，可空；null=不封榜）
+const contestCols2 = db.prepare('PRAGMA table_info(contests)').all();
+if (!contestCols2.some((c) => c.name === 'freeze_time')) {
+  db.exec('ALTER TABLE contests ADD COLUMN freeze_time TEXT');
 }
 
 // 事务助手（手动 BEGIN/COMMIT/ROLLBACK，单进程同步模型下足够）
