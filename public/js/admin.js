@@ -11,7 +11,7 @@
   renderNav('admin');
 
   // ---------- 标签页 ----------
-  const tabs = { problems: 'tab-problems', users: 'tab-users', subs: 'tab-subs' };
+  const tabs = { problems: 'tab-problems', contests: 'tab-contests', users: 'tab-users', subs: 'tab-subs' };
   document.querySelectorAll('.tab').forEach((t) => {
     t.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
@@ -19,6 +19,7 @@
         document.getElementById(sec).classList.toggle('hidden', key !== t.dataset.tab);
       });
       if (t.dataset.tab === 'problems') loadProblems();
+      if (t.dataset.tab === 'contests') loadContests();
       if (t.dataset.tab === 'users') loadUsers();
       if (t.dataset.tab === 'subs') loadSubs();
     });
@@ -56,6 +57,86 @@
     return collectRows('sample-rows', 1).concat(collectRows('tc-rows', 0));
   }
 
+  // ---------- 协议配置：结构化表单 ↔ JSON 双模式 ----------
+  function protocolMode() {
+    return document.getElementById('proto-form-btn').classList.contains('active') ? 'form' : 'json';
+  }
+  function setProtocolMode(mode) {
+    const form = mode === 'form';
+    document.getElementById('proto-form-btn').classList.toggle('active', form);
+    document.getElementById('proto-json-btn').classList.toggle('active', !form);
+    document.getElementById('proto-form').classList.toggle('hidden', !form);
+    document.getElementById('f-protocol').classList.toggle('hidden', form);
+    document.getElementById('proto-driver').dispatchEvent(new Event('change'));
+  }
+  function parseProtoFn(v, defName, defParams, defRet, defXParam) {
+    if (v === undefined || v === null) return { name: defName, params: defParams, ret: defRet, xParam: defXParam };
+    if (typeof v === 'string') return { name: v, params: defParams, ret: defRet, xParam: defXParam };
+    return {
+      name: v.name || defName,
+      params: Array.isArray(v.params) ? v.params : defParams,
+      ret: v.ret || defRet,
+      xParam: Number.isInteger(v.xParam) ? v.xParam : defXParam,
+    };
+  }
+  function parseProtoParams(str) {
+    return String(str || '').split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  // JSON 文本 → 表单字段
+  function fillFormFromJson(json) {
+    let obj = {};
+    try { obj = json ? JSON.parse(json) : {}; } catch (e) { obj = {}; }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) obj = {};
+    const driver = obj.driver === 'stations' ? 'stations' : 'two-phase';
+    document.getElementById('proto-driver').value = driver;
+    if (driver === 'stations') {
+      document.getElementById('proto-st-fn1').value = obj.fn1 || 'label';
+      document.getElementById('proto-st-fn2').value = obj.fn2 || 'find_next_station';
+    } else {
+      const fn1 = parseProtoFn(obj.fn1, 'Alice', ['string'], 'int');
+      const fn2 = parseProtoFn(obj.fn2, 'Bob', ['string', 'int'], 'int', 1);
+      document.getElementById('proto-fn1-name').value = fn1.name;
+      document.getElementById('proto-fn1-params').value = fn1.params.join(', ');
+      document.getElementById('proto-fn1-ret').value = fn1.ret;
+      document.getElementById('proto-fn2-name').value = fn2.name;
+      document.getElementById('proto-fn2-params').value = fn2.params.join(', ');
+      document.getElementById('proto-fn2-ret').value = fn2.ret;
+      document.getElementById('proto-fn2-xparam').value = fn2.xParam;
+      document.getElementById('proto-xmax').value = obj.xMax !== undefined ? obj.xMax : 1048575;
+      document.getElementById('proto-maxbytes').value = obj.maxIntermediateBytes !== undefined ? obj.maxIntermediateBytes : 1024;
+    }
+  }
+  // 表单字段 → JSON 文本
+  function buildJsonFromForm() {
+    const driver = document.getElementById('proto-driver').value;
+    if (driver === 'stations') {
+      return JSON.stringify({
+        driver: 'stations',
+        fn1: document.getElementById('proto-st-fn1').value.trim() || 'label',
+        fn2: document.getElementById('proto-st-fn2').value.trim() || 'find_next_station',
+      });
+    }
+    const fn1Params = parseProtoParams(document.getElementById('proto-fn1-params').value);
+    const fn2Params = parseProtoParams(document.getElementById('proto-fn2-params').value);
+    const xParam = Number(document.getElementById('proto-fn2-xparam').value);
+    return JSON.stringify({
+      driver: 'two-phase',
+      fn1: {
+        name: document.getElementById('proto-fn1-name').value.trim() || 'Alice',
+        params: fn1Params.length ? fn1Params : ['string'],
+        ret: document.getElementById('proto-fn1-ret').value,
+      },
+      fn2: {
+        name: document.getElementById('proto-fn2-name').value.trim() || 'Bob',
+        params: fn2Params.length ? fn2Params : ['string', 'int'],
+        xParam: Number.isInteger(xParam) ? xParam : 1,
+        ret: document.getElementById('proto-fn2-ret').value,
+      },
+      xMax: Number(document.getElementById('proto-xmax').value) || 1048575,
+      maxIntermediateBytes: Number(document.getElementById('proto-maxbytes').value) || 1024,
+    });
+  }
+
   function openForm(problem) {
     editingId = problem ? problem.id : null;
     document.getElementById('form-title').textContent = problem ? '编辑题目 #' + problem.id : '发布题目';
@@ -72,6 +153,8 @@
     document.getElementById('f-published').checked = problem ? !!problem.isPublished : true;
     document.getElementById('f-comm').checked = problem ? !!problem.isCommunication : false;
     document.getElementById('f-protocol').value = problem ? (problem.protocol || '') : '';
+    fillFormFromJson(document.getElementById('f-protocol').value);
+    setProtocolMode('form');
     const sampleRows = document.getElementById('sample-rows');
     const tcRows = document.getElementById('tc-rows');
     sampleRows.innerHTML = '';
@@ -107,6 +190,10 @@
     const tcs = collectTestcases();
     const judgeCount = collectRows('tc-rows', 0).length;
     if (judgeCount < 3) return err(`评测测试数据至少 3 组（当前 ${judgeCount} 组）`);
+    const isComm = document.getElementById('f-comm').checked;
+    if (isComm && protocolMode() === 'form') {
+      document.getElementById('f-protocol').value = buildJsonFromForm();
+    }
     const body = {
       title,
       description: document.getElementById('f-desc').value,
@@ -119,8 +206,8 @@
       memoryLimitMb: Number(document.getElementById('f-mem').value),
       solutionVisible: document.getElementById('f-sol-visible').checked,
       isPublished: document.getElementById('f-published').checked,
-      isCommunication: document.getElementById('f-comm').checked,
-      protocol: document.getElementById('f-protocol').value.trim() || null,
+      isCommunication: isComm,
+      protocol: isComm ? (document.getElementById('f-protocol').value.trim() || null) : null,
       testcases: tcs,
     };
     const r = editingId
@@ -188,6 +275,172 @@
           loadProblems();
         } else {
           toast(r2.json && r2.json.error || '操作失败', 'err');
+        }
+      });
+    });
+  }
+
+  // ---------- 比赛管理 ----------
+  let editingContestId = null;
+
+  // 本地时间 "YYYY-MM-DDTHH:MM" → 数据库 UTC "YYYY-MM-DD HH:MM:SS"
+  function toDbTime(local) {
+    if (!local) return null;
+    const d = new Date(local);
+    if (isNaN(d)) return null;
+    return d.toISOString().slice(0, 19).replace('T', ' ');
+  }
+  // 数据库 UTC "YYYY-MM-DD HH:MM:SS" → 本地时间 "YYYY-MM-DDTHH:MM"
+  function toLocalInput(dbTime) {
+    if (!dbTime) return '';
+    const d = new Date(dbTime.replace(' ', 'T') + 'Z');
+    if (isNaN(d)) return '';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  const CT_STATUS = {
+    upcoming: { text: '未开始', color: 'var(--ink-soft)' },
+    ongoing: { text: '进行中', color: 'var(--ac)' },
+    ended: { text: '已结束', color: 'var(--ink-soft)' },
+  };
+
+  async function renderContestPicker(selected) {
+    const box = document.getElementById('ct-problem-picker');
+    const r = await api('GET', '/api/problems');
+    if (r.status !== 200) {
+      box.innerHTML = `<span class="small muted">加载题目失败：${esc(r.json && r.json.error || '')}</span>`;
+      return;
+    }
+    const rows = r.json;
+    if (!rows.length) {
+      box.innerHTML = '<span class="small muted">暂无题目，请先在「题目管理」发布题目。</span>';
+      return;
+    }
+    box.innerHTML = rows
+      .map(
+        (p) => `
+        <label class="check ct-picker-item">
+          <input type="checkbox" class="ct-pick" value="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}>
+          <span class="mono small">P${String(p.id).padStart(4, '0')}</span>
+          <span style="flex:1;">${esc(p.title)}</span>
+        </label>`
+      )
+      .join('');
+  }
+
+  function openContestForm(contest) {
+    editingContestId = contest ? contest.id : null;
+    document.getElementById('contest-form-title').textContent = contest ? '编辑比赛 #' + contest.id : '创建比赛';
+    document.getElementById('ct-f-title').value = contest ? contest.title : '';
+    document.getElementById('ct-f-desc').value = contest ? (contest.description || '') : '';
+    document.getElementById('ct-f-start').value = contest ? toLocalInput(contest.startTime) : '';
+    document.getElementById('ct-f-end').value = contest ? toLocalInput(contest.endTime) : '';
+    document.getElementById('ct-f-freeze').value = contest ? toLocalInput(contest.freezeTime || '') : '';
+    document.getElementById('ct-f-public').checked = contest ? !!contest.isPublic : true;
+    document.getElementById('ct-form-err').classList.add('hidden');
+    document.getElementById('contest-form').classList.remove('hidden');
+    const selected = contest && contest.problems ? contest.problems.map((p) => p.id) : [];
+    renderContestPicker(selected);
+    document.getElementById('contest-form').scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function closeContestForm() {
+    document.getElementById('contest-form').classList.add('hidden');
+    editingContestId = null;
+  }
+
+  async function saveContest() {
+    const err = (msg) => {
+      const el = document.getElementById('ct-form-err');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    };
+    const title = document.getElementById('ct-f-title').value.trim();
+    if (!title) return err('标题不能为空');
+    const startTime = toDbTime(document.getElementById('ct-f-start').value);
+    const endTime = toDbTime(document.getElementById('ct-f-end').value);
+    const freezeTime = toDbTime(document.getElementById('ct-f-freeze').value); // 空 → null（不封榜）
+    if (!startTime) return err('开始时间必填');
+    if (!endTime) return err('结束时间必填');
+    const problemIds = [...document.querySelectorAll('.ct-pick:checked')].map((x) => Number(x.value));
+    const body = {
+      title,
+      description: document.getElementById('ct-f-desc').value,
+      startTime,
+      endTime,
+      freezeTime,
+      isPublic: document.getElementById('ct-f-public').checked,
+      problemIds,
+    };
+    const r = editingContestId
+      ? await api('PATCH', '/api/contests/' + editingContestId, body)
+      : await api('POST', '/api/contests', body);
+    if (r.status !== 200 && r.status !== 201) return err(r.json && r.json.error || '保存失败');
+    toast(editingContestId ? '已保存修改' : '比赛已创建');
+    closeContestForm();
+    loadContests();
+  }
+
+  async function loadContests() {
+    const r = await api('GET', '/api/contests');
+    const box = document.getElementById('contest-list');
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">加载失败：${esc(r.json && r.json.error || '')}</div>`;
+      return;
+    }
+    const rows = r.json;
+    document.getElementById('contest-count').textContent = `共 ${rows.length} 场比赛`;
+    if (!rows.length) {
+      box.innerHTML = '<div class="empty">还没有比赛。点右上角「创建比赛」创建第一场。</div>';
+      return;
+    }
+    box.innerHTML = `
+      <table class="table">
+        <thead><tr>
+          <th>#</th><th>标题</th><th>状态</th><th>时间</th><th>赛题</th><th>可见</th><th>操作</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map((c) => {
+            const s = CT_STATUS[c.status] || { text: c.status, color: 'var(--ink-soft)' };
+            return `
+            <tr>
+              <td class="mono">${c.id}</td>
+              <td><a href="/contest.html?id=${c.id}">${esc(c.title)}</a></td>
+              <td><span class="small" style="color:${s.color};">${s.text}</span></td>
+              <td class="mono small">${esc(fmtTime(c.startTime))} → ${esc(fmtTime(c.endTime))}</td>
+              <td class="mono small">${c.problemCount} 题</td>
+              <td>${c.isPublic ? '<span class="small" style="color:var(--ac);">公开</span>' : '<span class="small muted">隐藏</span>'}</td>
+              <td class="small">
+                <a href="#" class="ct-edit" data-id="${c.id}">编辑</a> ·
+                <a href="#" class="ct-del" data-id="${c.id}">删除</a>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+
+    box.querySelectorAll('.ct-edit').forEach((a) => {
+      a.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const r2 = await api('GET', '/api/contests/' + a.dataset.id);
+        if (r2.status !== 200) {
+          toast(r2.json && r2.json.error || '加载比赛失败', 'err');
+          return;
+        }
+        openContestForm(r2.json);
+      });
+    });
+    box.querySelectorAll('.ct-del').forEach((a) => {
+      a.addEventListener('click', async (e) => {
+        e.preventDefault();
+        if (!confirm('确认删除该比赛？其赛题关联将一并移除（不影响题目本身）。')) return;
+        const r2 = await api('DELETE', '/api/contests/' + a.dataset.id);
+        if (r2.status === 200) {
+          toast('已删除比赛');
+          loadContests();
+        } else {
+          toast(r2.json && r2.json.error || '删除失败', 'err');
         }
       });
     });
@@ -279,6 +532,22 @@
   });
   document.getElementById('form-save').addEventListener('click', saveProblem);
   document.getElementById('form-cancel').addEventListener('click', closeForm);
+  document.getElementById('proto-form-btn').addEventListener('click', () => {
+    fillFormFromJson(document.getElementById('f-protocol').value);
+    setProtocolMode('form');
+  });
+  document.getElementById('proto-json-btn').addEventListener('click', () => {
+    document.getElementById('f-protocol').value = buildJsonFromForm();
+    setProtocolMode('json');
+  });
+  document.getElementById('proto-driver').addEventListener('change', () => {
+    const isStations = document.getElementById('proto-driver').value === 'stations';
+    document.getElementById('proto-twophase').classList.toggle('hidden', isStations);
+    document.getElementById('proto-stations').classList.toggle('hidden', !isStations);
+  });
+  document.getElementById('new-contest').addEventListener('click', () => openContestForm(null));
+  document.getElementById('ct-form-save').addEventListener('click', saveContest);
+  document.getElementById('ct-form-cancel').addEventListener('click', closeContestForm);
 
   // 实时：提交变化时刷新总览（若在提交标签页）
   WOJ.openWs((msg) => {

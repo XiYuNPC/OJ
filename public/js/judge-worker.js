@@ -7,14 +7,20 @@
 //   TLE：本 worker 内执行是同步阻塞的，自身计时器无法触发，由页面主线程 watchdog 超时强杀实现；
 //   MLE：编译期把 WASM 内存上限设为题目限制（下限 20MB），运行中 OOM abort 按 stderr 特征串识别；
 //   timeMs 为 wall-clock 近似（含 WASM 启动开销），不统计内存（memoryKb 不回报）。
-// 通信题（两进程函数式，P12509）：编译产物用 -sMODULARIZE=1 -sEXPORT_NAME='JudgeModule'
+// 通信题（两进程函数式，protocol.driver 分流）：
+//   two-phase（P12509 / 通用标量协议）：编译产物用 -sMODULARIZE=1 -sEXPORT_NAME='JudgeModule'
 //   输出为工厂函数，每组数据「两次 new JudgeModule()」分别实例化协议 fn1 与 fn2 实例（严格两进程、
-//   全局状态互不可见），fn1 返回的 X 由本 worker 在 JS 侧传递给 fn2 实例。编译前注入 C 链接
-//   wrapper（C 函数名 oj_fn1/oj_fn2，负责 char*→std::string 转换，因 ccall 的 "string" 只能传
-//   char*、无法直接对 std::string 按值传参）；EXPORTED_FUNCTIONS 用 _oj_fn1/_oj_fn2 指代它们，
-//   ccall 用 oj_fn1/oj_fn2（不带前导下划线）。编译不加 -sEXIT_RUNTIME
-//   （否则运行时退出后函数不可调），且因无 main，胶水不会自动 callMain。测试数据约定：input 为
-//   "S\nT\n" 两行，expectedOutput 为期望 P。
+//   全局状态互不可见），fn1 返回的 X 由本 worker 在 JS 侧传递给 fn2 实例。签名按 protocol 声明
+//   （类型菜单：参数 string / int / long long / vector<int>；返回 string / int / long long），
+//   编译前由 generateTwoPhaseWrapper 注入 C 链接 wrapper（int 走 ccall "number"；long long 走
+//   十进制字符串 strtoll/to_string、64 位全精度；string 走 char*；vector<int> 走 int* 缓冲）；
+//   EXPORTED_FUNCTIONS 用 _oj_fn1/_oj_fn2 指代，ccall 用 oj_fn1/oj_fn2（不带前导下划线）。编译
+//   不加 -sEXIT_RUNTIME（否则运行时退出后函数不可调），且因无 main，胶水不会自动 callMain。
+//   测试数据约定：input 每行一个参数（依次 fn1 全部参数 → fn2 除 X 外参数），expectedOutput 为
+//   期望 P。旧式只写函数名按默认签名 fn1(string)→int / fn2(string,int)→int（X 为第二参）处理。
+//   stations（P6838 网络站点）：数组参数经 _malloc + HEAP32 缓冲区、数组返回值经 out 参数
+//   读回（ccall 无法返回数组）；判定不用 expectedOutput，由内置 grader 验证（编号合法性 +
+//   逐查询与 BFS 正确下一跳比对），测试数据为官方样例评测器格式（n k / n-1 条边 / q / q 行 z y）。
 //
 // 与主线程消息协议（入站）：
 //   {type:"start", task:{submissionId, problemId, language, sourceCode,
@@ -396,34 +402,327 @@ async function runCustom(task) {
   post({ type: "run-done", verdict, stdout: r.stdout, stderr: r.stderr, returncode: r.returncode, timeMs: r.timeMs, memoryKb: r.memoryKb });
 }
 
+// ---------- 通信题协议归一化与包装层生成（two-phase 泛化：按签名生成 wrapper） ----------
+// 类型菜单：参数 string / int / long long / vector<int>；返回 string / int / long long。
+// ABI 约定：int 走 ccall "number"；long long 走十进制字符串（wrapper strtoll / std::to_string
+//   转换，64 位全精度，绕开 JS number 的 2^53 精度上限）；string 走 char*（wrapper 转 std::string，
+//   返回时用静态缓冲 __weboj_sbuf 的 c_str）；vector<int> 走 int* 缓冲区 + 长度（wrapper 转
+//   std::vector<int>）。返回 string / long long 的 wrapper 返回 const char*，JS 侧 UTF8ToString 读取。
+
+const RET_TYPES = new Set(["string", "int", "long long"]);
+
+function toBigInt(v, def) {
+  try { return BigInt(String(v == null ? def : v)); } catch (e) { return BigInt(def); }
+}
+
+// 新旧式协议归一化：fn1 / fn2 可为字符串（旧式，默认签名 fn1(string)→int、fn2(string,int)→int，
+// X 为第二参）或对象 { name, params, ret }（新式声明完整签名；fn2 另带 xParam 表示 X 在参数中的下标）。
+function normalizeTwoPhase(protocol) {
+  protocol = protocol || {};
+  let fn1, fn2;
+  if (typeof protocol.fn1 === "object" && protocol.fn1) {
+    fn1 = {
+      name: protocol.fn1.name || "Alice",
+      params: Array.isArray(protocol.fn1.params) ? protocol.fn1.params : ["string"],
+      ret: RET_TYPES.has(protocol.fn1.ret) ? protocol.fn1.ret : "int",
+    };
+  } else {
+    fn1 = { name: protocol.fn1 || "Alice", params: ["string"], ret: "int" };
+  }
+  if (typeof protocol.fn2 === "object" && protocol.fn2) {
+    fn2 = {
+      name: protocol.fn2.name || "Bob",
+      params: Array.isArray(protocol.fn2.params) ? protocol.fn2.params : ["string", "int"],
+      xParam: Number.isInteger(protocol.fn2.xParam) ? protocol.fn2.xParam : 1,
+      ret: RET_TYPES.has(protocol.fn2.ret) ? protocol.fn2.ret : "int",
+    };
+  } else {
+    fn2 = { name: protocol.fn2 || "Bob", params: ["string", "int"], xParam: 1, ret: "int" };
+  }
+  if (fn2.xParam < 0 || fn2.xParam >= fn2.params.length) fn2.xParam = fn2.params.length - 1;
+  return {
+    driver: "two-phase",
+    fn1,
+    fn2,
+    xMax: toBigInt(protocol.xMax, 1048575),
+    maxIntermediateBytes: Number(protocol.maxIntermediateBytes) || 1024,
+    mutate: (protocol.mutate && typeof protocol.mutate === "object") ? protocol.mutate : null,
+  };
+}
+
+function cppType(t) {
+  return t === "string" ? "std::string" : t === "vector<int>" ? "std::vector<int>" : t;
+}
+
+// 生成单个函数的 extern "C" wrapper（把 ABI 参数转成 C++ 参数后调用户函数）
+function buildWrapper(name, params, ret) {
+  const cppParams = params.map((t, i) => `${cppType(t)} a${i}`).join(", ");
+  const abiParams = [];
+  const callArgs = [];
+  for (let i = 0; i < params.length; i++) {
+    const t = params[i];
+    if (t === "string") {
+      abiParams.push(`const char* a${i}`);
+      callArgs.push(`a${i} ? std::string(a${i}) : std::string()`);
+    } else if (t === "int") {
+      abiParams.push(`int a${i}`);
+      callArgs.push(`a${i}`);
+    } else if (t === "long long") {
+      abiParams.push(`const char* a${i}`);
+      callArgs.push(`a${i} ? strtoll(a${i}, nullptr, 10) : 0`);
+    } else if (t === "vector<int>") {
+      abiParams.push(`const int* a${i}, int a${i}_len`);
+      callArgs.push(`std::vector<int>(a${i}, a${i} + a${i}_len)`);
+    }
+  }
+  const call = `${name}(${callArgs.join(", ")})`;
+  let body;
+  if (ret === "int") body = `    return ${call};`;
+  else if (ret === "long long") body = `    __weboj_sbuf = std::to_string(${call});\n    return __weboj_sbuf.c_str();`;
+  else body = `    __weboj_sbuf = ${call};\n    return __weboj_sbuf.c_str();`;
+  return {
+    decl: `${cppType(ret)} ${name}(${cppParams})`,
+    abiRet: ret === "int" ? "int" : "const char*",
+    abiParamsStr: abiParams.length ? abiParams.join(", ") : "void",
+    body,
+  };
+}
+
+function generateTwoPhaseWrapper(proto) {
+  const w1 = buildWrapper(proto.fn1.name, proto.fn1.params, proto.fn1.ret);
+  const w2 = buildWrapper(proto.fn2.name, proto.fn2.params, proto.fn2.ret);
+  return (
+    "#include <string>\n#include <vector>\n#include <cstdlib>\n\n" +
+    `${w1.decl};\n${w2.decl};\n\n` +
+    "static std::string __weboj_sbuf;\n\n" +
+    "extern \"C\" {\n" +
+    `  ${w1.abiRet} oj_${proto.fn1.name}(${w1.abiParamsStr}) {\n${w1.body}\n  }\n` +
+    `  ${w2.abiRet} oj_${proto.fn2.name}(${w2.abiParamsStr}) {\n${w2.body}\n  }\n` +
+    "}\n\n"
+  );
+}
+
+// 按声明类型把 JS 值转成 ccall 参数（vector<int> 走 malloc 缓冲，调用后 freePtrs 释放）
+function buildCallArgs(mod, params, values) {
+  const types = [];
+  const args = [];
+  const ptrs = [];
+  for (let i = 0; i < params.length; i++) {
+    const t = params[i];
+    const v = values[i];
+    if (t === "string") {
+      types.push("string");
+      args.push(v == null ? "" : String(v));
+    } else if (t === "int") {
+      types.push("number");
+      args.push(Number(v) | 0);
+    } else if (t === "long long") {
+      types.push("string");
+      args.push(v == null ? "0" : String(v));
+    } else if (t === "vector<int>") {
+      const arr = Array.isArray(v) ? v.map((x) => Number(x) | 0) : [];
+      const ptr = mod._malloc(Math.max(arr.length, 1) * 4);
+      mod.HEAP32.set(arr, ptr >> 2);
+      types.push("number", "number");
+      args.push(ptr, arr.length);
+      ptrs.push(ptr);
+    }
+  }
+  return { types, args, ptrs };
+}
+
+function callJudgeFn(mod, name, retType, argTypes, args) {
+  if (retType === "int") return mod.ccall(name, "number", argTypes, args);
+  // string / long long：wrapper 返回 char*（静态缓冲），UTF8ToString 读出
+  const ptr = mod.ccall(name, "number", argTypes, args);
+  return mod.UTF8ToString(ptr);
+}
+
+function freePtrs(mod, ptrs) {
+  for (const p of ptrs) { try { mod._free(p); } catch (e) {} }
+}
+
+// 按声明类型解析测试数据的一行（string 取整行、int / long long 取整数、vector<int> 取空格分隔序列）
+function parseTwoPhaseValue(type, line) {
+  if (line === undefined) throw new Error("缺少参数值（输入行数不足）");
+  const s = String(line);
+  if (type === "string") return s;
+  if (type === "int") {
+    const t = s.trim();
+    if (!/^-?\d+$/.test(t)) throw new Error(`参数类型 int 解析失败："${s}" 不是整数`);
+    const n = Number(t);
+    if (n < -2147483648 || n > 2147483647) throw new Error(`int 参数超出 32 位范围：${t}`);
+    return n;
+  }
+  if (type === "long long") {
+    const t = s.trim();
+    if (!/^-?\d+$/.test(t)) throw new Error(`参数类型 long long 解析失败："${s}" 不是整数`);
+    return t; // 保留十进制字符串，保证 64 位精度
+  }
+  if (type === "vector<int>") {
+    const t = s.trim();
+    const parts = t === "" ? [] : t.split(/\s+/);
+    return parts.map((x) => {
+      if (!/^-?\d+$/.test(x)) throw new Error(`vector<int> 参数解析失败："${x}" 不是整数`);
+      return Number(x) | 0;
+    });
+  }
+  throw new Error(`未知参数类型：${type}`);
+}
+
+// 测试数据格式：每行一个参数，依次 fn1 全部参数 → fn2 除 X 外的全部参数
+function parseTwoPhaseInput(input, fn1params, fn2params, xParam) {
+  const lines = String(input == null ? "" : input).replace(/\r/g, "").split("\n");
+  let idx = 0;
+  try {
+    const fn1Values = fn1params.map((t) => parseTwoPhaseValue(t, lines[idx++]));
+    const fn2Values = [];
+    for (let i = 0; i < fn2params.length; i++) {
+      if (i === xParam) { fn2Values.push(undefined); continue; }
+      fn2Values.push(parseTwoPhaseValue(fn2params[i], lines[idx++]));
+    }
+    return { fn1Values, fn2Values };
+  } catch (e) {
+    return { error: "测试数据解析失败：" + e.message };
+  }
+}
+
+// X 校验：int / long long 落在 [0, xMax]（long long 用 BigInt 比较）；string 长度 ≤ maxIntermediateBytes
+function validateX(X, retType, xMax, maxIntermediateBytes) {
+  if (retType === "int") {
+    const n = Number(X);
+    if (!Number.isInteger(n) || n < 0 || n > Number(xMax)) {
+      return `fn1 返回 ${X}，超出协议范围 [0, ${xMax}]`;
+    }
+  } else if (retType === "long long") {
+    let big;
+    try { big = BigInt(X); } catch (e) { return `fn1 返回 ${X}，不是合法整数`; }
+    if (big < 0n || big > xMax) return `fn1 返回 ${X}，超出协议范围 [0, ${xMax}]`;
+  } else if (X.length > maxIntermediateBytes) {
+    return `fn1 返回字符串长度 ${X.length}，超过 maxIntermediateBytes=${maxIntermediateBytes}`;
+  }
+  return null;
+}
+
+// 固定种子的伪随机数生成器（LCG），mutate 变换共用，保证评测可复现
+function makeRng(seed) {
+  let state = (Number(seed) || 1) >>> 0;
+  return () => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state / 0x80000000;
+  };
+}
+
+// 中间值变换（mutate，可选）：grader 在把 X 传给 fn2 之前按协议对 X 做变换。
+// noise-num：X 约定为空格分隔的数字串，每个数字按 ratio 概率替换成 [min,max] 内的随机数（噪声信道，如 P9165）。
+// delete-edges：X 约定为空格分隔的边集（u1 v1 u2 v2 ...），按 seed 随机删恰好 delete 条边（删边信道，如 P10539）。
+function applyMutate(X, mutate) {
+  if (!mutate) return X;
+  if (typeof X !== "string") return X;
+  const rand = makeRng(mutate.seed);
+  if (mutate.type === "noise-num") {
+    const ratio = Number(mutate.ratio) || 0;
+    const min = Number(mutate.min) || 0;
+    const max = Number(mutate.max) || 0;
+    const parts = String(X).trim().split(/\s+/).filter((p) => p !== "");
+    return parts
+      .map((p) => (rand() < ratio ? String(min + Math.floor(rand() * (max - min + 1))) : p))
+      .join(" ");
+  }
+  if (mutate.type === "delete-edges") {
+    const del = Number(mutate.delete) || 0;
+    const meta = Number(mutate.meta) || 0; // 前 meta 个数为元数据（不参与删边，原样保留在头部）
+    const parts = String(X).trim().split(/\s+/).filter((p) => p !== "");
+    if (parts.length <= meta) return X;
+    const metaNums = parts.slice(0, meta);
+    const edgeNums = parts.slice(meta);
+    if (edgeNums.length < 2 || edgeNums.length % 2 !== 0) return X; // 非边集格式：原样传递
+    const edges = [];
+    for (let i = 0; i + 1 < edgeNums.length; i += 2) edges.push([edgeNums[i], edgeNums[i + 1]]);
+    if (del >= edges.length) return metaNums.join(" "); // 全删（协议校验保证 delete < 边数）
+    const removed = new Set();
+    while (removed.size < del) removed.add(Math.floor(rand() * edges.length));
+    const kept = edges.filter((_e, i) => !removed.has(i)).flat();
+    return metaNums.concat(kept).join(" ");
+  }
+  return X;
+}
+
+function fmtArg(v) {
+  if (typeof v === "string") return JSON.stringify(v);
+  if (Array.isArray(v)) return "[" + v.join(", ") + "]";
+  return String(v);
+}
+
 // 通信题编译：输出 MODULARIZE 工厂（可多次实例化），导出协议 wrapper 供 ccall 调用。
 // 与普通题差异：-sMODULARIZE=1 -sEXPORT_NAME=JudgeModule、去掉 -sEXIT_RUNTIME=1、
 // 加 -sEXPORTED_FUNCTIONS 导出函数。仍走 SINGLE_FILE 内嵌 wasm。
-// 关键点（ABI 对接）：用户按 C++ 习惯写 int fn(std::string)，但 ccall 的 "string" 参数只能
-//   传 C 字符串(char*)，二者不匹配（std::string 按值传参在 C++ ABI 下非 char*）。因此注入
-//   一组 C 链接 wrapper：C 函数名 oj_fn(const char*) / oj_fn(const char*, int)，内部构造
-//   std::string 再调用户函数，ccall 只与 wrapper 的 char* 签名对接。注意命名约定：C 函数名
-//   oj_fn（不带前导下划线），EXPORTED_FUNCTIONS 写 _oj_fn，ccall 写 oj_fn。
+// ABI 对接：wrapper 按协议声明签名自动生成（见上 generateTwoPhaseWrapper）；命名约定：
+// C 函数名 oj_fn（不带前导下划线），EXPORTED_FUNCTIONS 写 _oj_fn，ccall 写 oj_fn。
 async function compileCommunication(sourceCode, memoryLimitMb, protocol) {
+  // 按 protocol.driver 分流：stations 走数组 ABI 的专用 wrapper（见 compileStations）
+  if (protocol && protocol.driver === "stations") {
+    return compileStations(sourceCode, memoryLimitMb, protocol);
+  }
+  const proto = normalizeTwoPhase(protocol);
   const t0 = performance.now();
-  const fn1 = (protocol && protocol.fn1) || "Alice";
-  const fn2 = (protocol && protocol.fn2) || "Bob";
+  const wrapper = generateTwoPhaseWrapper(proto);
+  fs.writeFile("/working/main.cpp", wrapper + sourceCode);
+  ensureStdCppHeader();
+  const limitBytes = Math.max(memoryLimitMb || 64, 20) * 1024 * 1024; // 题限（下限 20MB）
+  // 内存口径：INITIAL_MEMORY 直接设为题限、不 ALLOW_MEMORY_GROWTH，初始堆即上限，
+  // malloc 超题限立即失败（抛 std::bad_alloc，stderr 带特征串按 MLE 判定）。
+  // 注意：HEAPU8.length 因此恒等于题限，不能拿它当「堆顶已逼近上限」的兜底——
+  // 该兜底恒真，会把一切运行时崩溃误判成 MLE（2026-08-25 走查 B8 空返回应判 RE 却判 MLE 暴露）。
+  const compile = emrun(
+    "em++", "-O2", "-fexceptions",
+    "-sSINGLE_FILE=1",
+    "-sMODULARIZE=1", "-sEXPORT_NAME='JudgeModule'",
+    "-sEXPORTED_FUNCTIONS=['_oj_" + proto.fn1.name + "','_oj_" + proto.fn2.name + "','_malloc','_free']",
+    "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','stringToUTF8','UTF8ToString','lengthBytesUTF8']",
+    "-sINITIAL_MEMORY=" + limitBytes, "-sTOTAL_STACK=2097152",
+    "-std=c++17", "-I/working",
+    "main.cpp", "-o", "main.js"
+  );
+  const timeMs = Math.round(performance.now() - t0);
+  if (compile.returncode !== 0) {
+    return { ok: false, errText: (compile.stderr || compile.stdout || "编译失败").slice(0, 4000), timeMs };
+  }
+  return { ok: true, mainJs: fs.readFile("/working/main.js", { encoding: "utf8" }), timeMs };
+}
+
+// 通信题编译（driver: stations，P6838 [IOI 2020] 网络站点）：与 two-phase 的差异仅在 ABI
+// 约定——label 的返回值是数组（ccall 无法返回数组，改为 out 参数：JS 预分配 n 个 int，
+// oj_label 写入后由 JS 经 HEAP32 读回；返回长度 ≠ n 时打印原因并 abort → RE）；u/v/c 数组
+// 经 int* 缓冲区传入（JS 用 _malloc + HEAP32 填数），wrapper 内转 std::vector<int>。
+// 其余编译参数与 two-phase 完全一致（MODULARIZE + 无 EXIT_RUNTIME + INITIAL_MEMORY=题限）。
+async function compileStations(sourceCode, memoryLimitMb, protocol) {
+  const t0 = performance.now();
+  const fn1 = (protocol && protocol.fn1) || "label";
+  const fn2 = (protocol && protocol.fn2) || "find_next_station";
   // 前置声明用户协议函数（保持 C++ 链接，wrapper 内以 C++ 方式调用）；
-  // 再注入 extern "C" wrapper，负责 char* -> std::string 转换。
-  const wrapper = `#include <string>\n` +
-    `int ${fn1}(std::string S);\n` +
-    `int ${fn2}(std::string T, int X);\n\n` +
+  // 再注入 extern "C" wrapper（C 函数名 oj_*，EXPORTED_FUNCTIONS 写 _oj_*，ccall 写 oj_*）。
+  const wrapper = `#include <vector>\n` +
+    `#include <cstdio>\n` +
+    `#include <cstdlib>\n\n` +
+    `std::vector<int> ${fn1}(int n, int k, std::vector<int> u, std::vector<int> v);\n` +
+    `int ${fn2}(int s, int t, std::vector<int> c);\n\n` +
     `extern "C" {\n` +
-    `  int oj_${fn1}(const char* S) { return ${fn1}(S ? std::string(S) : std::string()); }\n` +
-    `  int oj_${fn2}(const char* T, int X) { return ${fn2}(T ? std::string(T) : std::string(), X); }\n` +
+    `  void oj_${fn1}(int n, int k, const int* u, const int* v, int* out) {\n` +
+    `    std::vector<int> L = ${fn1}(n, k, std::vector<int>(u, u + n - 1), std::vector<int>(v, v + n - 1));\n` +
+    `    if ((int)L.size() != n) {\n` +
+    `      fprintf(stderr, "${fn1} 返回长度 %d，期望 %d\\n", (int)L.size(), n);\n` +
+    `      abort();\n` +
+    `    }\n` +
+    `    for (int i = 0; i < n; i++) out[i] = L[i];\n` +
+    `  }\n` +
+    `  int oj_${fn2}(int s, int t, const int* c, int clen) {\n` +
+    `    return ${fn2}(s, t, std::vector<int>(c, c + clen));\n` +
+    `  }\n` +
     `}\n\n`;
   fs.writeFile("/working/main.cpp", wrapper + sourceCode);
   ensureStdCppHeader();
   const limitBytes = Math.max(memoryLimitMb || 64, 20) * 1024 * 1024; // 题限（下限 20MB）
-  // 内存口径：INITIAL_MEMORY 直接设为题限、不 ALLOW_MEMORY_GROWTH。这样初始堆即上限，
-  // malloc 超题限立即失败（抛 std::bad_alloc），且失败时 HEAPU8.length 已等于题限，
-  // 供 runCommunicationCase 的「堆大小 ≥ 题限×0.9」兜底把 MLE 从 RE 里区分出来。
-  // （若用 16MB 起步 + grow，grow 失败时 HEAPU8 停留在初始值，堆大小兜底会失效。）
   const compile = emrun(
     "em++", "-O2", "-fexceptions",
     "-sSINGLE_FILE=1",
@@ -443,64 +742,86 @@ async function compileCommunication(sourceCode, memoryLimitMb, protocol) {
 
 // 实例化通信题编译产物：new Function 执行 main.js 并 return 出 JudgeModule 工厂，再 new 实例。
 // 每个实例有独立堆与全局状态（严格两进程语义）。
-async function instantiateJudge(mainJs) {
+async function instantiateJudge(mainJs, onStderr) {
   if (!globalThis.document) globalThis.document = { currentScript: null };
   const factory = new Function(mainJs + "\nreturn JudgeModule;")();
   if (typeof factory !== "function") {
     throw new Error("通信题编译产物未导出 JudgeModule 工厂（MODULARIZE 失败）");
   }
-  const mod = await factory({ print: () => {}, printErr: () => {} });
+  // onStderr：可选回调，捕获实例运行期的 printErr/stderr（如 wrapper 的 abort 前提示）
+  const mod = await factory({
+    print: () => {},
+    printErr: (...a) => { if (onStderr) onStderr(a.join(" ")); },
+  });
   if (!mod || typeof mod.ccall !== "function") {
     throw new Error("通信题实例缺少 ccall（EXPORTED_RUNTIME_METHODS 未生效）");
   }
   return mod;
 }
 
-// 运行一组通信题测试：两次独立实例化，分别调用 fn1(Alice) 与 fn2(Bob)。
-// 协议 two-phase：X = Alice(S)；P = Bob(T, X)；比对 P 与 expectedOutput。
+// 运行一组通信题测试：两次独立实例化，分别调用 fn1 与 fn2。
+// 协议 two-phase（泛化）：X = fn1(其参数)；P = fn2(除 X 外的参数，X 在 xParam 位置)；比对 P 与 expectedOutput。
 async function runCommunicationCase(mainJs, tc, protocol, memoryLimitMb) {
+  // 按 protocol.driver 分流：stations 走内置 grader（见 runStationsCase）
+  if (protocol && protocol.driver === "stations") {
+    return runStationsCase(mainJs, tc, protocol, memoryLimitMb);
+  }
   const t0 = performance.now();
-  const fn1 = protocol.fn1 || "Alice";
-  const fn2 = protocol.fn2 || "Bob";
-  const xMax = Number(protocol.xMax) || 1048575;
-  const maxMemBytes = Math.max(memoryLimitMb || 64, 20) * 1024 * 1024; // 与编译 -sINITIAL_MEMORY（题限）一致
+  const proto = normalizeTwoPhase(protocol);
+  const { fn1, fn2, xMax, maxIntermediateBytes } = proto;
 
-  // 测试数据约定：input = "S\nT\n"（两行），expectedOutput = 期望 P
-  const lines = String(tc.input ?? "").split("\n");
-  const S = (lines[0] ?? "").trim();
-  const T = (lines[1] ?? "").trim();
+  // 测试数据：每行一个参数，依次 fn1 全部参数 → fn2 除 X 外的全部参数（按声明类型解析）
+  const parsed = parseTwoPhaseInput(tc.input, fn1.params, fn2.params, fn2.xParam);
+  if (parsed.error) {
+    return {
+      returncode: 1, stdout: "", ok: false, stderr: parsed.error,
+      timeMs: Math.round(performance.now() - t0), memoryKb: null,
+    };
+  }
   const expected = String(tc.expectedOutput ?? "").replace(/\n$/, "");
 
   let modA = null, modB = null;
   try {
-    // 阶段一：Alice(S) → X（经 C 链接 wrapper oj_fn1 完成 char*→std::string 转换）
+    // 阶段一：fn1(...) → X（经 C 链接 wrapper oj_fn1 完成 ABI 转换）
     modA = await instantiateJudge(mainJs);
-    const X = modA.ccall("oj_" + fn1, "number", ["string"], [S]);
-    if (!Number.isFinite(X) || X < 0 || X > xMax) {
+    const c1 = buildCallArgs(modA, fn1.params, parsed.fn1Values);
+    const X = callJudgeFn(modA, "oj_" + fn1.name, fn1.ret, c1.types, c1.args);
+    freePtrs(modA, c1.ptrs);
+    const xErr = validateX(X, fn1.ret, xMax, maxIntermediateBytes);
+    if (xErr) {
       return {
-        returncode: 1, stdout: "", ok: false,
-        stderr: `${fn1}(${JSON.stringify(S)}) 返回 ${X}，超出协议范围 [0, ${xMax}]`,
+        returncode: 1, stdout: "", ok: false, stderr: xErr,
         timeMs: Math.round(performance.now() - t0),
         memoryKb: modA.HEAPU8 ? Math.round(modA.HEAPU8.length / 1024) : null,
       };
     }
 
-    // 阶段二：Bob(T, X) → P（新实例，与 Alice 实例完全隔离；经 oj_fn2 转换）
+    // 中间值变换（可选）：按协议对 X 做变换后再传给 fn2（如噪声信道，见 applyMutate）
+    const Xmut = applyMutate(X, proto.mutate);
+
+    // 阶段二：fn2(..., X, ...) → P（新实例，与 fn1 实例完全隔离）
     modB = await instantiateJudge(mainJs);
-    const P = modB.ccall("oj_" + fn2, "number", ["string", "number"], [T, X]);
-    const ok = String(P) === expected;
+    const fn2Values = parsed.fn2Values.slice();
+    fn2Values[fn2.xParam] = Xmut;
+    const c2 = buildCallArgs(modB, fn2.params, fn2Values);
+    const P = callJudgeFn(modB, "oj_" + fn2.name, fn2.ret, c2.types, c2.args);
+    freePtrs(modB, c2.ptrs);
+    const Pstr = String(P);
+    const ok = Pstr === expected;
     return {
-      returncode: 0, stdout: String(P), stderr: "", ok, X, P,
+      returncode: 0, stdout: Pstr, stderr: "", ok, X, P: Pstr,
       timeMs: Math.round(performance.now() - t0),
       memoryKb: modB.HEAPU8 ? Math.round(modB.HEAPU8.length / 1024) : null,
     };
   } catch (ex) {
-    // MLE 兜底：除 stderr 特征串外，若异常时 WASM 堆已逼近上限（≥90% MAXIMUM_MEMORY），
-    // 也视为内存不足——避免 C++ new 抛 std::bad_alloc 等无 OOM 特征串的崩溃被误判成 RE。
+    // MLE 按 stderr 特征串识别（与普通题口径一致）。不用「HEAPU8.length ≥ 90% 题限」兜底：
+    // 通信题编译固定 -sINITIAL_MEMORY=题限，HEAPU8.length 恒等于题限，该兜底恒真、
+    // 会把一切运行时崩溃误判成 MLE（2026-08-25 走查 B8 暴露）；OOM 场景自带
+    // out of memory / bad_alloc / cannot enlarge memory 等特征串，特征串足以覆盖。
     const heapBytes = (modB && modB.HEAPU8 && modB.HEAPU8.length)
       || (modA && modA.HEAPU8 && modA.HEAPU8.length) || 0;
     const stack = String((ex && ex.stack) || ex);
-    const oom = isOom(stack) || (heapBytes > 0 && heapBytes >= maxMemBytes * 0.9);
+    const oom = isOom(stack);
     return {
       returncode: 1, stdout: "", ok: false,
       stderr: stack,
@@ -509,6 +830,236 @@ async function runCommunicationCase(mainJs, tc, protocol, memoryLimitMb) {
       memoryKb: heapBytes ? Math.round(heapBytes / 1024) : null,
     };
   }
+}
+
+// ---------- 通信题 driver：stations（P6838 [IOI 2020] 网络站点） ----------
+// 与官方评测模型对应：程序运行两次、全局状态互不可见，等价于每组数据两次独立实例化——
+// 实例 A 只调 label（编号方案经 out 参数读回、保存在本 worker JS 侧），实例 B 以保存的编号
+// 逐查询调用 find_next_station。判定由内置 grader 完成（非输出比对，expectedOutput 弃用）：
+// ①编号合法（互不相同、∈[0,k]）；②逐查询与 BFS 算出的正确下一跳编号一致；首错即停。
+
+// 测试数据格式（官方样例评测器格式的 r=1 特化）：
+//   n k\n（u v）× (n-1)\nq\n（z y）× q
+function parseStationsInput(input) {
+  const nums = String(input ?? "").trim().split(/\s+/).map(Number);
+  let p = 0;
+  const n = nums[p++];
+  const k = nums[p++];
+  if (!Number.isInteger(n) || !Number.isInteger(k) || n < 2 || k < 0) {
+    throw new Error("stations 测试数据格式错误（首行应为 n k）");
+  }
+  const edges = [];
+  const adj = Array.from({ length: n }, () => []);
+  for (let i = 0; i < n - 1; i++) {
+    const u = nums[p++], v = nums[p++];
+    if (!Number.isInteger(u) || !Number.isInteger(v) || u < 0 || v < 0 || u >= n || v >= n || u === v) {
+      throw new Error(`stations 测试数据第 ${i + 1} 条边非法`);
+    }
+    edges.push([u, v]);
+    adj[u].push(v);
+    adj[v].push(u);
+  }
+  const q = nums[p++];
+  if (!Number.isInteger(q) || q < 0) {
+    throw new Error("stations 测试数据格式错误（查询数 q）");
+  }
+  const queries = [];
+  for (let i = 0; i < q; i++) {
+    const z = nums[p++], y = nums[p++];
+    if (!Number.isInteger(z) || !Number.isInteger(y) || z < 0 || y < 0 || z >= n || y >= n || z === y) {
+      throw new Error(`stations 测试数据第 ${i + 1} 个查询非法（z≠y 且均在 [0, n-1]）`);
+    }
+    queries.push([z, y]);
+  }
+  return { n, k, edges, adj, queries };
+}
+
+// 树上 BFS 求 z→y 的下一跳站点 w（y 是 z 的邻居时 w = y）
+function bfsNext(adj, z, y) {
+  const prev = new Array(adj.length).fill(-1);
+  prev[z] = z;
+  const queue = [z];
+  for (let head = 0; head < queue.length; head++) {
+    const u = queue[head];
+    if (u === y) break;
+    for (const w of adj[u]) {
+      if (prev[w] === -1) {
+        prev[w] = u;
+        queue.push(w);
+      }
+    }
+  }
+  let cur = y;
+  while (prev[cur] !== z) cur = prev[cur];
+  return cur;
+}
+
+// 运行一组 stations 测试。返回：returncode 0 表示程序本身运行正常（WA 也走这里，ok:false +
+// message 为明细文案）；非 0 为 RE/MLE（oom 标志区分）。r.L/r.m/r.qr 供自定义运行展示。
+async function runStationsCase(mainJs, tc, protocol, memoryLimitMb) {
+  const t0 = performance.now();
+  const fn1 = protocol.fn1 || "label";
+  const fn2 = protocol.fn2 || "find_next_station";
+
+  const { n, k, edges, adj, queries } = parseStationsInput(tc.input);
+
+  const qr = []; // 逐查询明细：[{z, y, s, t, c, rv, expected}]
+  let L = null;  // label 返回的编号方案（WA 明细与自定义运行展示用）
+  const wa = (message, memoryKb) => ({
+    returncode: 0, stdout: "", stderr: "", ok: false, message, L, qr,
+    timeMs: Math.round(performance.now() - t0), memoryKb,
+  });
+
+  let modA = null, modB = null, errBuf = "";
+  const capErr = (s) => { errBuf += s + "\n"; };
+  try {
+    // 阶段一：label(n,k,u,v) → L（新实例；编号方案经 out 参数读回，保存在本 worker JS 侧）
+    modA = await instantiateJudge(mainJs, capErr);
+    const edgeCount = n - 1;
+    const uPtr = modA._malloc(edgeCount * 4);
+    const vPtr = modA._malloc(edgeCount * 4);
+    const outPtr = modA._malloc(n * 4);
+    modA.HEAP32.set(edges.map((e) => e[0]), uPtr >> 2);
+    modA.HEAP32.set(edges.map((e) => e[1]), vPtr >> 2);
+    modA.ccall("oj_" + fn1, null, ["number", "number", "number", "number", "number"], [n, k, uPtr, vPtr, outPtr]);
+    L = Array.from(modA.HEAP32.subarray(outPtr >> 2, (outPtr >> 2) + n));
+    modA._free(uPtr); modA._free(vPtr); modA._free(outPtr);
+
+    // 校验编号：互不相同且 ∈ [0,k]（违规判 WA，明细写原因）
+    const pos = new Map();
+    for (let i = 0; i < n; i++) {
+      const x = L[i];
+      const memKb = modA.HEAPU8 ? Math.round(modA.HEAPU8.length / 1024) : null;
+      if (!Number.isInteger(x) || x < 0 || x > k) {
+        return wa(`编号不合法：站点 ${i} 的编号为 ${x}，应在 [0, ${k}] 内`, memKb);
+      }
+      if (pos.has(x)) {
+        return wa(`编号不合法：编号 ${x} 在站点 ${pos.get(x)} 与站点 ${i} 重复出现`, memKb);
+      }
+      pos.set(x, i);
+    }
+    const m = Math.max(...L);
+
+    // 阶段二：逐查询 find_next_station(s, t, c)（新实例，与 label 实例完全隔离；
+    // c 为当前站邻居编号升序，经 oj_find_next_station 的 int* 缓冲区传入）
+    modB = await instantiateJudge(mainJs, capErr);
+    for (let qi = 0; qi < queries.length; qi++) {
+      const [z, y] = queries[qi];
+      const s = L[z], t = L[y];
+      const c = adj[z].map((w) => L[w]).sort((a, b) => a - b);
+      const cPtr = modB._malloc(Math.max(c.length, 1) * 4);
+      modB.HEAP32.set(c, cPtr >> 2);
+      const rv = modB.ccall("oj_" + fn2, "number", ["number", "number", "number", "number"], [s, t, cPtr, c.length]);
+      modB._free(cPtr);
+      const expected = L[bfsNext(adj, z, y)];
+      qr.push({ z, y, s, t, c, rv, expected });
+      if (rv !== expected) {
+        return wa(
+          `第 ${qi + 1} 个查询错误：站点 ${z}→${y}（编号 ${s}→${t}，邻居编号 [${c.join(", ")}]）` +
+            `应返回编号 ${expected}，实际返回 ${rv}`,
+          modB.HEAPU8 ? Math.round(modB.HEAPU8.length / 1024) : null
+        );
+      }
+    }
+
+    return {
+      returncode: 0, stdout: `${queries.length} 个查询全部正确，m=${m}`, stderr: "", ok: true,
+      L, m, qr,
+      timeMs: Math.round(performance.now() - t0),
+      memoryKb: modB.HEAPU8 ? Math.round(modB.HEAPU8.length / 1024) : null,
+    };
+  } catch (ex) {
+    // 与 two-phase 同一套口径：MLE 只按 stderr 特征串识别（HEAPU8.length 恒等于题限，
+    // 「≥90% 题限」兜底恒真、会把崩溃误判成 MLE，2026-08-25 走查 B8 暴露后已去掉）；
+    // 实例的 printErr 也收进 errBuf（如 wrapper 的「返回长度不符」abort 前提示），
+    // 一并拼进 stderr 供明细展示。
+    const heapBytes = (modB && modB.HEAPU8 && modB.HEAPU8.length)
+      || (modA && modA.HEAPU8 && modA.HEAPU8.length) || 0;
+    const stack = String((ex && ex.stack) || ex);
+    const oom = isOom(stack) || isOom(errBuf);
+    return {
+      returncode: 1, stdout: "", ok: false,
+      stderr: (errBuf ? errBuf + "\n" : "") + stack,
+      oom, L, qr,
+      timeMs: Math.round(performance.now() - t0),
+      memoryKb: heapBytes ? Math.round(heapBytes / 1024) : null,
+    };
+  }
+}
+
+// 通信题自定义运行：编译 + 对用户输入单组运行（供题目页「运行代码」使用）。
+// 协议与 runCustom 一致：run-compile-start → (run-compile-error | run-start → run-done) | run-error。
+// 通信题无 stdin/stdout，把两阶段结果组织成可读文本作为 stdout 展示（X / P）。
+async function runCommunicationCustom(task) {
+  await ensureInit();
+  const protocol = task.protocol || {};
+  if (protocol.driver === "stations") {
+    await runStationsCustom(task, protocol);
+    return;
+  }
+  const proto = normalizeTwoPhase(protocol);
+  const { fn1, fn2 } = proto;
+  post({ type: "run-compile-start" });
+  const built = await compileCommunication(task.sourceCode, task.memoryLimitMb, protocol);
+  if (!built.ok) {
+    post({ type: "run-compile-error", stderr: built.errText, timeMs: built.timeMs });
+    return;
+  }
+  post({ type: "run-start" });
+  const r = await runCommunicationCase(built.mainJs, { input: task.input, expectedOutput: task.expectedOutput }, protocol, task.memoryLimitMb);
+  // 单组判定：运行出错 → MLE/RE；填了预期输出才判 AC/WA，否则 verdict 为 null（仅展示运行结果）
+  let verdict = null;
+  if (r.returncode !== 0) {
+    verdict = (r.oom || isOom(r.stderr)) ? "MLE" : "RE";
+  } else if (task.expectedOutput != null && task.expectedOutput !== "") {
+    verdict = String(r.P) === String(task.expectedOutput).replace(/\n$/, "") ? "AC" : "WA";
+  }
+  // 两阶段结果拼成可读文本（输入按每行一个参数解析）
+  const parsed = parseTwoPhaseInput(task.input, fn1.params, fn2.params, fn2.xParam);
+  const fn2Vals = parsed.error ? [] : parsed.fn2Values.slice();
+  if (!parsed.error) fn2Vals[fn2.xParam] = r.X;
+  const stdout = r.returncode === 0
+    ? (parsed.error
+        ? `（输入解析失败：${parsed.error}）`
+        : `${fn1.name}(${parsed.fn1Values.map(fmtArg).join(", ")}) → X = ${r.X}\n` +
+          `${fn2.name}(${fn2Vals.map(fmtArg).join(", ")}) → P = ${r.P}`)
+    : "";
+  post({ type: "run-done", verdict, stdout, stderr: r.stderr, X: r.X, P: r.P, returncode: r.returncode, timeMs: r.timeMs, memoryKb: r.memoryKb });
+}
+
+// 通信题自定义运行（driver: stations）：编译 + 对用户输入（stations 数据格式）单组运行。
+// 与 runCommunicationCustom 同一消息协议；无标准输出，把编号方案与逐查询结果（含 grader
+// 的期望值对照）组织为可读文本作为 stdout 展示。
+async function runStationsCustom(task, protocol) {
+  const fn1 = protocol.fn1 || "label";
+  post({ type: "run-compile-start" });
+  const built = await compileCommunication(task.sourceCode, task.memoryLimitMb, protocol);
+  if (!built.ok) {
+    post({ type: "run-compile-error", stderr: built.errText, timeMs: built.timeMs });
+    return;
+  }
+  post({ type: "run-start" });
+  const r = await runStationsCase(built.mainJs, { input: task.input, expectedOutput: "" }, protocol, task.memoryLimitMb);
+  // 单组判定：运行出错 → MLE/RE；其余为展示性结果，verdict 为 null（与 two-phase 自定义运行口径一致）
+  let verdict = null;
+  if (r.returncode !== 0) {
+    verdict = (r.oom || isOom(r.stderr)) ? "MLE" : "RE";
+  }
+  let stdout = "";
+  if (r.returncode === 0) {
+    const parts = [];
+    if (r.ok) parts.push(`${r.qr.length} 个查询全部正确，m=${r.m}`);
+    if (r.L) parts.push(`${fn1} 编号方案（站点 0..n-1）：[${r.L.join(", ")}]`);
+    r.qr.forEach((row, idx) => {
+      parts.push(
+        `查询 ${idx + 1}：站点 ${row.z}→${row.y}（编号 ${row.s}→${row.t}，邻居编号 [${row.c.join(", ")}]）` +
+          `返回 ${row.rv}，期望 ${row.expected}${row.rv === row.expected ? "（正确）" : "（不一致）"}`
+      );
+    });
+    if (!r.ok && r.message) parts.push(r.message);
+    stdout = parts.join("\n");
+  }
+  post({ type: "run-done", verdict, stdout, stderr: r.stderr, returncode: r.returncode, timeMs: r.timeMs, memoryKb: r.memoryKb });
 }
 
 async function judge() {
@@ -625,7 +1176,8 @@ async function judgeCommunication(task) {
 
     if (!r.ok) {
       verdict = "WA";
-      const runLog = `返回 ${r.P}，期望 ${tc.expectedOutput}`.slice(0, 1000);
+      // two-phase：返回 P 与期望比对；stations：内置 grader 的明细文案（r.message）
+      const runLog = (r.message || `返回 ${r.P}，期望 ${tc.expectedOutput}`).slice(0, 1000);
       details.push(caseDetail(tc, false, runLog));
       fillRest(i);
       post({ type: "case-done", ordinal: tc.ordinal, ok: false, actualOutput: runLog, timeMs: r.timeMs });
@@ -651,7 +1203,11 @@ self.onmessage = async (e) => {
     }
   } else if (msg.type === "run" && msg.task) {
     try {
-      await runCustom(msg.task);
+      if (msg.task.isCommunication) {
+        await runCommunicationCustom(msg.task);
+      } else {
+        await runCustom(msg.task);
+      }
     } catch (err) {
       post({ type: "run-error", message: String((err && err.stack) || err) });
     }
