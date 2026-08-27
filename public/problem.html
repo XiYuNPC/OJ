@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>题目 · WebOJ</title>
 <link rel="stylesheet" href="/css/style.css">
@@ -14,12 +15,15 @@
 </main>
 
 <script src="/js/api.js"></script>
+<script src="/js/markdown.js"></script>
 <script src="/js/code-editor.js"></script>
 <script>
   const { api, esc, qs, renderNav, toast, getUser, fmtTime, verdictBadge, statusDot } = WOJ;
   renderNav();
 
   const id = Number(qs('id'));
+  const contestId = qs('contestId');
+  const contestIdNum = Number(contestId) > 0 ? Number(contestId) : null;
   if (!id) {
     document.getElementById('content').innerHTML = '<div class="empty">缺少题目编号</div>';
   } else {
@@ -38,6 +42,40 @@
     const isAdmin = user && user.role === 'admin';
     const canSubmit = user;
 
+    // 通信题协议解析（fn1/fn2 供题面「评测方式」与提交面板提示共用）
+    let proto = {};
+    try { proto = typeof p.protocol === 'string' ? JSON.parse(p.protocol) : (p.protocol || {}); } catch (e) { proto = {}; }
+    const isStations = proto.driver === 'stations';
+    const fnName = (f, def) => (f && typeof f === 'object') ? (f.name || def) : (f || def);
+    const fn1 = fnName(proto.fn1, isStations ? 'label' : 'Alice');
+    const fn2 = fnName(proto.fn2, isStations ? 'find_next_station' : 'Bob');
+    const sigOf = (f, def) => (f && typeof f === 'object')
+      ? `${f.ret || 'int'} ${f.name}(${(f.params || []).join(', ')})`
+      : def;
+    const fn1Sig = isStations
+      ? `std::vector<int> ${fn1}(int n, int k, std::vector<int> u, std::vector<int> v)`
+      : sigOf(proto.fn1, `int ${fn1}(std::string)`);
+    const fn2Sig = isStations
+      ? `int ${fn2}(int s, int t, std::vector<int> c)`
+      : sigOf(proto.fn2, `int ${fn2}(std::string, int)`);
+    // RUN/TEST 输入提示：two-phase 每行一个参数；stations 用官方样例评测器格式
+    let commInputLabel = '输入参数（每行一个：fn1 参数在前、fn2 除 X 外参数在后）';
+    let commInputPlaceholder = '每行一个参数';
+    let commExpectLabel = '预期输出（可选）';
+    if (isStations) {
+      commInputLabel = '输入数据（stations 格式）';
+      commInputPlaceholder = 'n k，然后 n-1 行边 u v，然后 q，再 q 行查询 z y';
+      commExpectLabel = '预期输出（stations 弃用，由内置 grader 判定）';
+    } else {
+      const p1 = (proto.fn1 && Array.isArray(proto.fn1.params)) ? proto.fn1.params : ['string'];
+      const p2 = (proto.fn2 && Array.isArray(proto.fn2.params)) ? proto.fn2.params : ['string', 'int'];
+      const xp = (proto.fn2 && Number.isInteger(proto.fn2.xParam)) ? proto.fn2.xParam : 1;
+      const lines = [];
+      p1.forEach((t) => lines.push(`${fn1} 参数（${t}）`));
+      p2.forEach((t, i) => { if (i !== xp) lines.push(`${fn2} 参数（${t}）`); });
+      commInputPlaceholder = lines.map((s, i) => `第 ${i + 1} 行：${s}`).join('；');
+    }
+
     const tcCount = Array.isArray(p.testcases) ? p.testcases.length : null;
     const testcaseHint = tcCount !== null
       ? `<p class="small muted" style="margin:0;">本题共 ${tcCount} 组测试数据，提交后逐组比对。</p>`
@@ -53,30 +91,9 @@
           <a class="btn btn-primary" href="/login.html?next=${encodeURIComponent(location.pathname + location.search)}" style="justify-content:center;">登录后提交</a>
         </div>`;
     } else if (p.isCommunication) {
-      let proto = {};
-      try { proto = typeof p.protocol === 'string' ? JSON.parse(p.protocol) : (p.protocol || {}); } catch (e) { proto = {}; }
-      const fn1 = proto.fn1 || 'Alice';
-      const fn2 = proto.fn2 || 'Bob';
       panel = `
         <div class="card">
           <div class="eyebrow mb">SUBMIT</div>
-          <div class="notice" style="margin-bottom:10px;">通信题：请实现 ${esc(fn1)} 与 ${esc(fn2)} 两个函数（不要写 main），评测驱动会分两次独立运行调用。</div>
-          <textarea class="code-editor" id="code" spellcheck="false">${esc(localStorage.getItem('weboj_draft') || '')}</textarea>
-          <label class="check" style="margin-top:10px;">
-            <input type="checkbox" id="public-code" checked>
-            <span class="small">公开代码（他人可查看你的源代码与评测结果）</span>
-          </label>
-          <div class="form-err hidden mt" id="submit-err"></div>
-          <button class="btn btn-primary mt" id="submit-btn" style="width:100%;justify-content:center;">提交评测</button>
-          ${testcaseHint}
-        </div>`;
-    } else {
-      panel = `
-        <div class="card">
-          <div class="eyebrow mb">SUBMIT</div>
-          <div class="flex mb" style="justify-content:space-between;">
-            <span class="chip">C++</span>
-          </div>
           <textarea class="code-editor" id="code" spellcheck="false">${esc(localStorage.getItem('weboj_draft') || '')}</textarea>
           <label class="check" style="margin-top:10px;">
             <input type="checkbox" id="public-code" checked>
@@ -86,6 +103,39 @@
           <button class="btn btn-primary mt" id="submit-btn" style="width:100%;justify-content:center;">提交评测</button>
           ${testcaseHint}
           <div class="run-panel">
+            <div class="eyebrow mb">RUN / TEST</div>
+            <label class="run-label" for="run-input">${esc(commInputLabel)}</label>
+            <textarea class="run-io" id="run-input" placeholder="${esc(commInputPlaceholder)}"></textarea>
+            <label class="run-label" for="run-expect">${esc(commExpectLabel)}</label>
+            <textarea class="run-io" id="run-expect" placeholder="填写后，运行结果会与之自动比对"></textarea>
+            <button class="btn mt" id="run-btn" style="width:100%;justify-content:center;">运行代码</button>
+            <label class="run-label" for="run-output">实际输出</label>
+            <pre class="run-output" id="run-output">（尚未运行）</pre>
+            <div class="run-status" id="run-status"></div>
+          </div>
+        </div>`;
+    } else {
+      panel = `
+        <div class="card">
+          <div class="eyebrow mb">SUBMIT</div>
+          <div class="flex mb" style="justify-content:space-between;align-items:center;gap:8px;">
+            <select id="lang-select" class="lang-select" style="flex:1;font-size:14px;padding:8px 10px;border:1px solid var(--line-strong);border-radius:6px;background:rgba(255,255,255,0.04);color:var(--ink);font-family:var(--font-mono);">
+              <option value="cpp">C++ · 浏览器内实时编译</option>
+              <option value="c">C · 后端评测机</option>
+              <option value="python">Python 3 · 后端评测机</option>
+              <option value="java">Java · 后端评测机</option>
+            </select>
+          </div>
+          <p class="small muted mb hidden" id="lang-no-run" style="margin:0 0 10px;">该语言由后端评测机评测，不支持浏览器内实时编译运行（RUN/TEST 仅限 C++）。</p>
+          <textarea class="code-editor" id="code" spellcheck="false">${esc(localStorage.getItem('weboj_draft') || '')}</textarea>
+          <label class="check" style="margin-top:10px;">
+            <input type="checkbox" id="public-code" checked>
+            <span class="small">公开代码（他人可查看你的源代码与评测结果）</span>
+          </label>
+          <div class="form-err hidden mt" id="submit-err"></div>
+          <button class="btn btn-primary mt" id="submit-btn" style="width:100%;justify-content:center;">提交评测</button>
+          ${testcaseHint}
+          <div class="run-panel" id="run-panel">
             <div class="eyebrow mb">RUN / TEST</div>
             <label class="run-label" for="run-input">输入 stdin</label>
             <textarea class="run-io" id="run-input" placeholder="自定义输入（可选，逐行）"></textarea>
@@ -103,7 +153,7 @@
       ? `
         <div class="card">
           <div class="eyebrow">题解</div>
-          <div class="statement mt">${esc(p.solution)}</div>
+          <div class="statement mt md">${renderMarkdown(p.solution)}</div>
         </div>`
       : `
         <div class="card">
@@ -143,6 +193,7 @@
       section('输入格式', p.inputFormat) +
       section('输出格式', p.outputFormat) +
       samplesHtml +
+      (p.isCommunication ? section('评测方式', `通信题：请实现 ${fn1Sig} 与 ${fn2Sig} 两个函数（不要写 main），评测驱动会分两次独立运行调用。`) : '') +
       section('说明/提示', p.hint);
 
     box.innerHTML = `
@@ -150,6 +201,7 @@
         <div class="eyebrow">PROBLEM ${String(p.id).padStart(4, '0')}</div>
         <h1 class="page-title">${esc(p.title)}</h1>
         <p class="page-sub">
+          ${contestIdNum ? `<span class="chip chip-comm">比赛 #${contestIdNum} 提交</span> <a href="/contest.html?id=${contestIdNum}" style="font-size:13px;">← 返回比赛</a><br>` : ''}
           <span class="chip">${esc(p.timeLimitMs)}ms</span>
           <span class="chip">${esc(p.memoryLimitMb)}MB</span>
           ${p.isCommunication ? '<span class="chip chip-comm">通信题</span>' : ''}
@@ -214,7 +266,7 @@
               ${rows.map((s) => `
                 <tr>
                   <td class="mono"><a href="/submission.html?id=${s.id}">#${s.id}</a></td>
-                  <td class="mono">${esc(s.username)}</td>
+                  <td class="mono"><a href="/user.html?username=${encodeURIComponent(s.username)}">${esc(s.username)}</a></td>
                   <td>${s.verdict ? verdictBadge(s.verdict) : statusDot(s.status)}</td>
                   <td class="mono small">${s.timeMs != null ? esc(s.timeMs) + 'ms' : '—'}</td>
                   <td class="mono small">${esc(fmtTime(s.createdAt))}</td>
@@ -230,6 +282,20 @@
     // 提交逻辑
     const codeEl = document.getElementById('code');
     const errEl = document.getElementById('submit-err');
+    const langSelect = document.getElementById('lang-select');
+    const runPanel = document.getElementById('run-panel');
+    const langNoRun = document.getElementById('lang-no-run');
+    // 语言切换：浏览器内实时编译仅限 C++，RUN/TEST 面板随语言显隐
+    function syncLang() {
+      if (!langSelect) return;
+      const isCpp = langSelect.value === 'cpp';
+      if (runPanel) runPanel.classList.toggle('hidden', !isCpp);
+      if (langNoRun) langNoRun.classList.toggle('hidden', isCpp);
+    }
+    if (langSelect) {
+      langSelect.addEventListener('change', syncLang);
+      syncLang();
+    }
     if (codeEl) {
       installCodeEditor(codeEl);
       codeEl.addEventListener('input', () => localStorage.setItem('weboj_draft', codeEl.value));
@@ -247,12 +313,14 @@
         submitBtn.disabled = true;
         submitBtn.textContent = '提交中…';
         const publicEl = document.getElementById('public-code');
-        const r = await api('POST', '/api/submissions', {
+        const body = {
           problemId: p.id,
-          language: 'cpp',
+          language: langSelect ? langSelect.value : 'cpp',
           sourceCode,
           isPublic: publicEl && publicEl.checked ? 1 : 0,
-        });
+        };
+        if (contestIdNum) body.contestId = contestIdNum;
+        const r = await api('POST', '/api/submissions', body);
         submitBtn.disabled = false;
         submitBtn.textContent = '提交评测';
         if (r.status !== 201) {
@@ -261,7 +329,8 @@
           return;
         }
         localStorage.removeItem('weboj_draft');
-        toast('已提交，浏览器内评测已启动');
+        const isCpp = langSelect ? langSelect.value === 'cpp' : true;
+        toast(isCpp ? '已提交，浏览器内评测已启动' : '已提交，等待后端评测机评测');
         location.href = '/submission.html?id=' + r.json.id;
       });
     }
@@ -353,7 +422,7 @@
               break;
             case 'run-start':
               setRunStatus('运行中…', '');
-              setTimer(timeLimitMs + 3000);
+              setTimer(timeLimitMs + (p.isCommunication ? 6000 : 3000));
               break;
             case 'run-done': {
               clearTimeout(timer);
@@ -391,6 +460,8 @@
             expectedOutput: runExpectEl.value,
             timeLimitMs,
             memoryLimitMb: p.memoryLimitMb || 64,
+            isCommunication: !!p.isCommunication,
+            protocol: p.isCommunication ? proto : null,
           },
         });
       });

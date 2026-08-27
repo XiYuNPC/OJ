@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>用户主页 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap">
+  <div id="content"><div class="empty">加载中…</div></div>
+</main>
+
+<script src="/js/api.js"></script>
+<script>
+  const { api, esc, qs, renderNav, toast, fmtTime, statusText, verdictBadge } = WOJ;
+  renderNav();
+
+  const username = qs('username');
+  if (!username) {
+    document.getElementById('content').innerHTML = '<div class="empty">缺少用户名</div>';
+  } else {
+    load();
+  }
+
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  // 确定性头像：按用户名哈希从色板选一组渐变 + 首字母
+  function avatar(name) {
+    const palettes = [
+      ['#5E6AD2', '#7B84E8'],
+      ['#8B5CF6', '#A78BFA'],
+      ['#3B82F6', '#60A5FA'],
+      ['#0EA5E9', '#38BDF8'],
+      ['#6366F1', '#818CF8'],
+    ];
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    const [a, b] = palettes[h % palettes.length];
+    return { a, b, initial: (name[0] || '?').toUpperCase() };
+  }
+
+  function fmtDate(d) {
+    return d.getUTCFullYear() + '-' +
+      String(d.getUTCMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getUTCDate()).padStart(2, '0');
+  }
+  function level(n) {
+    if (!n) return 0;
+    if (n <= 2) return 1;
+    if (n <= 4) return 2;
+    if (n <= 8) return 3;
+    return 4;
+  }
+
+  // GitHub 风格热力图：52 周 × 7 天（周日开头），颜色按提交次数分 5 档
+  function heatmapHtml(heatmap, endDate) {
+    const map = {};
+    heatmap.forEach((h) => { map[h.date] = h.count; });
+
+    const end = new Date(endDate + 'T00:00:00Z');
+    const WEEKS = 52;
+    const thisSunday = new Date(end);
+    thisSunday.setUTCDate(thisSunday.getUTCDate() - end.getUTCDay());
+    const firstSunday = new Date(thisSunday);
+    firstSunday.setUTCDate(firstSunday.getUTCDate() - (WEEKS - 1) * 7);
+
+    // 月份标签：记录每月第一列的 grid 列号
+    const months = [];
+    let cur = -1;
+    for (let w = 0; w < WEEKS; w++) {
+      const sun = new Date(firstSunday);
+      sun.setUTCDate(sun.getUTCDate() + w * 7);
+      const m = sun.getUTCMonth();
+      if (m !== cur) { cur = m; months.push({ label: MONTHS[m], col: w + 2 }); }
+    }
+
+    let html = '';
+    months.forEach((mm, i) => {
+      const start = mm.col;
+      const end = i + 1 < months.length ? months[i + 1].col : WEEKS + 2;
+      html += `<span class="hm-month" style="grid-column:${start} / ${end};grid-row:1">${mm.label}</span>`;
+    });
+    // 星期标签（Mon / Wed / Fri）
+    html += '<span class="hm-day" style="grid-column:1;grid-row:3">Mon</span>';
+    html += '<span class="hm-day" style="grid-column:1;grid-row:5">Wed</span>';
+    html += '<span class="hm-day" style="grid-column:1;grid-row:7">Fri</span>';
+
+    for (let w = 0; w < WEEKS; w++) {
+      const sun = new Date(firstSunday);
+      sun.setUTCDate(sun.getUTCDate() + w * 7);
+      for (let d = 0; d < 7; d++) {
+        const day = new Date(sun);
+        day.setUTCDate(sun.getUTCDate() + d);
+        if (day > end) continue; // 未来日期不渲染
+        const ds = fmtDate(day);
+        const c = map[ds] || 0;
+        const lv = level(c);
+        html += `<div class="hm-cell${lv ? ' l' + lv : ''}" title="${c} 次提交 · ${ds}" style="grid-column:${w + 2};grid-row:${d + 2}"></div>`;
+      }
+    }
+    return `<div class="hm-grid">${html}</div>`;
+  }
+
+  function problemItem(p, badge) {
+    return `
+      <a class="pt-item" href="/problem.html?id=${p.id}">
+        <span class="pt-pid">P${String(p.id).padStart(4, '0')}</span>
+        <span class="pt-title">${esc(p.title)}</span>
+        ${p.isCommunication ? '<span class="chip chip-comm">通信题</span>' : ''}
+        ${badge}
+      </a>`;
+  }
+
+  async function load() {
+    const r = await api('GET', '/api/users/' + encodeURIComponent(username));
+    const box = document.getElementById('content');
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">${esc(r.json && r.json.error || '用户不存在')}</div>`;
+      return;
+    }
+    const u = r.json;
+    document.title = `${u.username} · WebOJ`;
+    const av = avatar(u.username);
+
+    const solved = (u.solvedProblems || []).map((p) =>
+      problemItem(p, '<span class="verdict verdict-AC">AC</span>')
+    ).join('');
+
+    const attempted = (u.attemptedProblems || []).map((p) => {
+      const badge = p.lastVerdict
+        ? verdictBadge(p.lastVerdict)
+        : `<span class="verdict verdict-none">${statusText(p.lastStatus) || '未完成'}</span>`;
+      return problemItem(p, badge);
+    }).join('');
+
+    box.innerHTML = `
+      <div class="page-head">
+        <div class="eyebrow">USER PROFILE</div>
+      </div>
+
+      <div class="card">
+        <div class="profile-head">
+          <div class="avatar" style="background:linear-gradient(135deg, ${av.a}, ${av.b});">${av.initial}</div>
+          <div>
+            <div class="profile-id">@${esc(u.username)}</div>
+            <h1 class="profile-name">${esc(u.username)}</h1>
+            <div class="profile-meta">
+              <span class="chip${u.role === 'admin' ? ' chip-comm' : ''}">${u.role === 'admin' ? '管理员' : '会员'}</span>
+              <span class="small muted">注册于 ${esc(fmtTime(u.createdAt))}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="stat-grid" style="margin-top:22px;">
+          <div class="stat accent"><div class="stat-num">${u.stats.solvedCount}</div><div class="stat-label">已解决</div></div>
+          <div class="stat"><div class="stat-num">${u.stats.attemptedCount}</div><div class="stat-label">尝试中</div></div>
+          <div class="stat"><div class="stat-num">${u.stats.totalSubmissions}</div><div class="stat-label">总提交</div></div>
+          <div class="stat"><div class="stat-num">${u.stats.acSubmissions}</div><div class="stat-label">通过提交 (AC)</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="eyebrow mb">提交热力图</div>
+        ${u.stats.totalSubmissions
+          ? heatmapHtml(u.heatmap || [], u.endDate) + `
+            <div class="hm-legend">
+              <span>少</span>
+              <span class="hm-cell"></span><span class="hm-cell l1"></span><span class="hm-cell l2"></span><span class="hm-cell l3"></span><span class="hm-cell l4"></span>
+              <span>多</span>
+            </div>`
+          : '<p class="small muted" style="margin:0;">暂无提交记录，去<a href="/">题库</a>挑一道题试试。</p>'}
+      </div>
+
+      <div class="card">
+        <div class="eyebrow mb">已解决的题目（${u.stats.solvedCount}）</div>
+        ${solved ? `<div class="pt-list">${solved}</div>` : '<p class="small muted" style="margin:0;">还没有解决的题目。</p>'}
+      </div>
+
+      <div class="card">
+        <div class="eyebrow mb">尝试的题目（${u.stats.attemptedCount}）</div>
+        ${attempted ? `<div class="pt-list">${attempted}</div>` : '<p class="small muted" style="margin:0;">暂无进行中的题目。</p>'}
+      </div>`;
+  }
+
+  load().catch((e) => toast('加载失败：' + e.message, 'err'));
+</script>
+</body>
+</html>

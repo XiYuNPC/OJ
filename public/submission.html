@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>提交详情 · WebOJ</title>
 <link rel="stylesheet" href="/css/style.css">
@@ -101,7 +102,8 @@
         <div class="eyebrow">SUBMISSION #${s.id}</div>
         <h1 class="page-title">
           <a href="/problem.html?id=${s.problemId}">${esc(s.problemTitle)}</a>
-          <span class="muted small" style="margin-left:8px;">by ${esc(s.username)}</span>
+          ${s.contestId != null ? `<a class="chip chip-comm" href="/contest.html?id=${s.contestId}">比赛 #${s.contestId}</a>` : ''}
+          <span class="muted small" style="margin-left:8px;">by <a href="/user.html?username=${encodeURIComponent(s.username)}">${esc(s.username)}</a></span>
         </h1>
         <p class="page-sub">${esc(fmtTime(s.createdAt))} · ${statusDot(s.status)}</p>
       </div>

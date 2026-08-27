@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>后台 · WebOJ</title>
 <link rel="stylesheet" href="/css/style.css">
@@ -18,6 +19,7 @@
 
   <div class="tabs">
     <button class="tab active" data-tab="problems">题目管理</button>
+    <button class="tab" data-tab="contests">比赛管理</button>
     <button class="tab" data-tab="users">用户管理</button>
     <button class="tab" data-tab="subs">提交总览</button>
   </div>
@@ -79,9 +81,56 @@
             <label class="check"><input type="checkbox" id="f-comm"> 通信题</label>
           </div>
           <div class="field">
-            <label>协议配置（JSON，通信题）</label>
-            <textarea id="f-protocol" rows="2" placeholder='{"driver":"two-phase","fn1":"Alice","fn2":"Bob","xMax":1048575}'></textarea>
-            <div class="hint">两进程函数式通信题的协议参数：两个函数名、中间值上限等。非通信题可留空。</div>
+            <label>协议配置（通信题）</label>
+            <div class="flex" style="gap:8px;margin-bottom:8px;">
+              <button type="button" class="btn btn-sm proto-mode active" id="proto-form-btn">结构化表单</button>
+              <button type="button" class="btn btn-sm proto-mode" id="proto-json-btn">JSON</button>
+            </div>
+            <div id="proto-form">
+              <div class="field">
+                <label>驱动</label>
+                <select id="proto-driver">
+                  <option value="two-phase">two-phase（标量两进程）</option>
+                  <option value="stations">stations（数组参数 + 内置 grader）</option>
+                </select>
+              </div>
+              <div id="proto-twophase">
+                <div class="flex" style="gap:14px;">
+                  <div class="field" style="flex:1;"><label>fn1 函数名</label><input type="text" id="proto-fn1-name" placeholder="Alice"></div>
+                  <div class="field" style="flex:1;"><label>fn1 返回类型</label><select id="proto-fn1-ret"><option>int</option><option>long long</option><option>string</option></select></div>
+                </div>
+                <div class="field">
+                  <label>fn1 参数类型（逗号分隔）</label>
+                  <input type="text" id="proto-fn1-params" placeholder="string">
+                  <div class="hint">可选：string / int / long long / vector&lt;int&gt;</div>
+                </div>
+                <div class="flex" style="gap:14px;">
+                  <div class="field" style="flex:1;"><label>fn2 函数名</label><input type="text" id="proto-fn2-name" placeholder="Bob"></div>
+                  <div class="field" style="flex:1;"><label>fn2 返回类型</label><select id="proto-fn2-ret"><option>int</option><option>long long</option><option>string</option></select></div>
+                </div>
+                <div class="field">
+                  <label>fn2 参数类型（逗号分隔，X 位置由下方指定）</label>
+                  <input type="text" id="proto-fn2-params" placeholder="string, int">
+                </div>
+                <div class="field">
+                  <label>fn2 中 X 的参数下标（0 起，X 类型 = fn1 返回类型）</label>
+                  <input type="number" id="proto-fn2-xparam" value="1" min="0">
+                </div>
+                <div class="flex" style="gap:14px;">
+                  <div class="field" style="flex:1;"><label>xMax（X 为数值时上限）</label><input type="number" id="proto-xmax" value="1048575" min="0"></div>
+                  <div class="field" style="flex:1;"><label>maxIntermediateBytes（X 为字符串时长度上限）</label><input type="number" id="proto-maxbytes" value="1024" min="0"></div>
+                </div>
+              </div>
+              <div id="proto-stations" class="hidden">
+                <div class="flex" style="gap:14px;">
+                  <div class="field" style="flex:1;"><label>fn1 函数名</label><input type="text" id="proto-st-fn1" placeholder="label"></div>
+                  <div class="field" style="flex:1;"><label>fn2 函数名</label><input type="text" id="proto-st-fn2" placeholder="find_next_station"></div>
+                </div>
+                <div class="hint">stations 驱动固定签名：fn1(int, int, vector&lt;int&gt;, vector&lt;int&gt;)→vector&lt;int&gt;、fn2(int, int, vector&lt;int&gt;)→int，只需填两个函数名。</div>
+              </div>
+            </div>
+            <textarea id="f-protocol" rows="4" placeholder='{"driver":"two-phase","fn1":{"name":"Alice","params":["string"],"ret":"int"},"fn2":{"name":"Bob","params":["string","int"],"xParam":1,"ret":"int"},"xMax":1048575}' style="font-family:var(--font-mono);font-size:13px;"></textarea>
+            <div class="hint">非通信题可留空；通信题默认签名为 fn1(string)→int、fn2(string,int)→int（X 为第二参）。</div>
           </div>
           <div class="field">
             <label>样例（题面公开可见，可留空）</label>
@@ -103,6 +152,59 @@
     </div>
 
     <div class="card" id="problem-list"><div class="empty">加载中…</div></div>
+  </section>
+
+  <!-- 比赛管理 -->
+  <section id="tab-contests" class="hidden">
+    <div class="flex mb" style="justify-content:space-between;">
+      <span class="small muted" id="contest-count"></span>
+      <button class="btn btn-primary" id="new-contest">+ 创建比赛</button>
+    </div>
+
+    <div class="card hidden" id="contest-form">
+      <div class="eyebrow" id="contest-form-title">创建比赛</div>
+      <div class="split" style="grid-template-columns:1fr 1fr;margin-top:12px;">
+        <div>
+          <div class="field">
+            <label>标题</label>
+            <input type="text" id="ct-f-title" maxlength="200">
+          </div>
+          <div class="field">
+            <label>比赛简介（可选）</label>
+            <textarea id="ct-f-desc" rows="3" style="font-family:var(--font-sans);"></textarea>
+          </div>
+          <div class="flex" style="gap:14px;">
+            <div class="field" style="flex:1;">
+              <label>开始时间</label>
+              <input type="datetime-local" id="ct-f-start">
+            </div>
+            <div class="field" style="flex:1;">
+              <label>结束时间</label>
+              <input type="datetime-local" id="ct-f-end">
+            </div>
+          </div>
+          <div class="field">
+            <label>封榜时间（可选，留空 = 不封榜）</label>
+            <input type="datetime-local" id="ct-f-freeze">
+            <div class="hint">封榜后提交冻结、不公开结果；赛后滚榜从封榜时刻的榜单开始逐条揭晓。</div>
+          </div>
+          <label class="check"><input type="checkbox" id="ct-f-public" checked> 公开（游客可见）</label>
+        </div>
+        <div>
+          <div class="field">
+            <label>赛题（勾选加入本场比赛）</label>
+            <div id="ct-problem-picker" class="ct-picker"><span class="small muted">加载题目中…</span></div>
+          </div>
+          <div class="form-err hidden" id="ct-form-err"></div>
+          <div class="flex">
+            <button class="btn btn-primary" id="ct-form-save">保存</button>
+            <button class="btn" id="ct-form-cancel">取消</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="contest-list"><div class="empty">加载中…</div></div>
   </section>
 
   <!-- 用户管理 -->

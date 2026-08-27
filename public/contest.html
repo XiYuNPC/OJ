@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>比赛详情 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap">
+  <div class="page-head">
+    <div class="eyebrow">CONTEST</div>
+    <h1 class="page-title" id="ct-title">比赛详情</h1>
+    <p class="page-sub" id="ct-sub">加载中…</p>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="home">首页</button>
+    <button class="tab" data-tab="problems">题目</button>
+    <button class="tab" data-tab="status">评测状态</button>
+    <button class="tab" data-tab="scoreboard">排行榜</button>
+    <button class="tab" data-tab="announcements">通知</button>
+  </div>
+
+  <!-- 首页：比赛信息 + 简介 -->
+  <section id="tab-home">
+    <div class="card" id="ct-info" style="display:none;">
+      <div class="ct-info-grid">
+        <div class="ct-info-item"><span class="ct-info-label">状态</span><span class="ct-info-value" id="ct-status">—</span></div>
+        <div class="ct-info-item"><span class="ct-info-label">开始时间</span><span class="ct-info-value" id="ct-start">—</span></div>
+        <div class="ct-info-item"><span class="ct-info-label">结束时间</span><span class="ct-info-value" id="ct-end">—</span></div>
+        <div class="ct-info-item"><span class="ct-info-label">赛题数量</span><span class="ct-info-value" id="ct-count">—</span></div>
+      </div>
+      <div class="ct-desc-block" id="ct-desc" style="display:none;"></div>
+    </div>
+  </section>
+
+  <!-- 题目 -->
+  <section id="tab-problems" class="hidden">
+    <div class="card" id="ct-problems">
+      <div class="eyebrow" style="margin-bottom:12px;">PROBLEMS</div>
+      <div id="ct-list"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
+
+  <!-- 评测状态：本比赛全部提交 -->
+  <section id="tab-status" class="hidden">
+    <div class="card">
+      <div class="flex" style="justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <div class="eyebrow">STATUS</div>
+        <div class="flex" style="gap:10px;align-items:center;">
+          <span class="small muted">提交评测完成后自动刷新（WS 推送）</span>
+          <button class="btn btn-sm" id="st-refresh">刷新</button>
+        </div>
+      </div>
+      <div id="st-wrap"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
+
+  <!-- 排行榜：实时榜 + 赛后滚榜 -->
+  <section id="tab-scoreboard" class="hidden">
+    <div class="card" id="ct-scoreboard">
+      <div class="sb-head">
+        <div class="eyebrow">SCOREBOARD</div>
+        <div class="sb-actions">
+          <span class="small muted" id="sb-note"></span>
+          <button class="btn btn-sm" id="sb-reveal-btn" style="display:none;">开始滚榜</button>
+          <button class="btn btn-sm hidden" id="sb-live-btn">退出滚榜</button>
+        </div>
+      </div>
+      <div class="sb-reveal-bar hidden" id="sb-reveal-bar">
+        <span class="small muted">点击榜单任意处揭晓下一题 · </span>
+        <span class="small muted sb-reveal-progress" id="sb-reveal-progress">0 / 0</span>
+      </div>
+      <div class="sb-wrap" id="sb-wrap">
+        <div class="empty">加载中…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 通知：公告列表（管理员可发布/编辑/删除） -->
+  <section id="tab-announcements" class="hidden">
+    <div class="card hidden" id="ann-form">
+      <div class="eyebrow" id="ann-form-title">发布通知</div>
+      <div class="field" style="margin-top:12px;">
+        <label>标题</label>
+        <input type="text" id="ann-f-title" maxlength="100">
+      </div>
+      <div class="field">
+        <label>内容</label>
+        <textarea id="ann-f-content" rows="4" style="font-family:var(--font-sans);"></textarea>
+      </div>
+      <div class="form-err hidden" id="ann-form-err"></div>
+      <div class="flex">
+        <button class="btn btn-primary" id="ann-form-save">保存</button>
+        <button class="btn" id="ann-form-cancel">取消</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="flex" style="justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <div class="eyebrow">ANNOUNCEMENTS</div>
+        <button class="btn btn-sm" id="ann-new-btn" style="display:none;">+ 发布通知</button>
+      </div>
+      <div id="ann-list"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
+</main>
+
+<script src="/js/api.js"></script>
+<script>
+  const { api, esc, qs, renderNav, toast, fmtTime, verdictBadge } = WOJ;
+  renderNav('contests');
+
+  const id = Number(qs('id'));
+  const STATUS = {
+    upcoming: { text: '未开始', cls: 'ct-upcoming' },
+    ongoing: { text: '进行中', cls: 'ct-ongoing' },
+    ended: { text: '已结束', cls: 'ct-ended' },
+  };
+  const PENALTY_PER_WRONG_MIN = 20;
+
+  let contest = null;      // 比赛详情
+  let sbData = null;       // { contest, problems, rows, submissions }
+  let revealing = false;
+  let reveal = null;       // 封榜滚榜状态：{ pre, revealOrder, startMs }
+  let statusLoaded = false;
+  let scoreboardLoaded = false;
+  let announcementsLoaded = false;
+  let editingAnnId = null;
+
+  function toMs(s) {
+    return Date.parse(String(s).replace(' ', 'T') + 'Z');
+  }
+
+  // ---------- 标签切换（当前标签写进 URL hash，刷新/直达保持） ----------
+  const TABS = ['home', 'problems', 'status', 'scoreboard', 'announcements'];
+  function currentTab() {
+    const h = location.hash.replace('#', '');
+    return TABS.includes(h) ? h : 'home';
+  }
+  function switchTab(tab) {
+    if (!TABS.includes(tab)) tab = 'home';
+    document.querySelectorAll('.tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+    TABS.forEach((t) => document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab));
+    const want = '#' + tab;
+    if (location.hash !== want) history.replaceState(null, '', want);
+    if (tab === 'status' && !statusLoaded) loadStatus();
+    if (tab === 'scoreboard' && !scoreboardLoaded) loadScoreboard();
+    if (tab === 'announcements' && !announcementsLoaded) loadAnnouncements();
+  }
+  document.querySelectorAll('.tabs .tab').forEach((b) => {
+    b.addEventListener('click', () => switchTab(b.dataset.tab));
+  });
+  window.addEventListener('hashchange', () => switchTab(currentTab()));
+
+  // ---------- ACM 榜单计算（与后端一致，供滚榜重放） ----------
+  function newUserMap() {
+    const map = new Map();
+    for (const s of sbData.submissions) {
+      if (!map.has(s.username)) {
+        map.set(s.username, { userId: s.userId, username: s.username, solved: 0, penalty: 0, lastAcMs: null, cells: new Map() });
+      }
+    }
+    return map;
+  }
+  function applySub(u, s, startMs) {
+    if (!u.cells.has(s.problemId)) u.cells.set(s.problemId, { problemId: s.problemId, status: null, attempts: 0, wrong: 0, acTime: null, lastTime: null });
+    const cell = u.cells.get(s.problemId);
+    if (cell.status === 'ac') return false; // AC 后提交不计
+    const submitMin = Math.max(1, Math.ceil((toMs(s.createdAt) - startMs) / 60000));
+    cell.attempts++;
+    cell.lastTime = submitMin;
+    if (s.verdict === 'AC') {
+      cell.status = 'ac';
+      cell.acTime = submitMin;
+      u.solved++;
+      u.penalty += cell.acTime + cell.wrong * PENALTY_PER_WRONG_MIN;
+      if (u.lastAcMs === null || toMs(s.createdAt) > u.lastAcMs) u.lastAcMs = toMs(s.createdAt);
+    } else if (s.verdict && s.verdict !== 'CE') {
+      cell.status = cell.status || 'tried';
+      cell.wrong++;
+    } else if (s.verdict === 'CE') {
+      cell.status = cell.status || 'tried';
+    }
+    return true;
+  }
+  function sortedUsers(map) {
+    const arr = [...map.values()];
+    arr.sort(
+      (a, b) =>
+        b.solved - a.solved ||
+        a.penalty - b.penalty ||
+        (a.lastAcMs ?? Infinity) - (b.lastAcMs ?? Infinity) ||
+        a.username.localeCompare(b.username)
+    );
+    return arr;
+  }
+  function cloneMap(map) {
+    const out = new Map();
+    for (const [k, u] of map) {
+      out.set(k, {
+        userId: u.userId, username: u.username, solved: u.solved, penalty: u.penalty, lastAcMs: u.lastAcMs,
+        cells: new Map([...u.cells].map(([pid, c]) => [pid, { ...c }])),
+      });
+    }
+    return out;
+  }
+
+  // 封榜切分：freezeTime 为空 = 不封榜（无冻结提交）
+  function splitByFreeze(subs, contest) {
+    if (!contest.freezeTime) return { pre: subs, frozen: [] }; // 不封榜：无冻结
+    const freezeMs = toMs(contest.freezeTime);
+    const pre = [];
+    const frozen = [];
+    for (const s of subs) {
+      if (toMs(s.createdAt) < freezeMs) pre.push(s);
+      else frozen.push(s);
+    }
+    return { pre, frozen };
+  }
+  // 冻结提交按「队伍 × 题目」分组（每个格子 = 一道题的若干条冻结提交，一次性揭晓）
+  function groupFrozenByCell(frozen) {
+    const byCell = new Map();
+    for (const s of frozen) {
+      const key = s.username + '|' + s.problemId;
+      if (!byCell.has(key)) byCell.set(key, { username: s.username, problemId: s.problemId, subs: [] });
+      byCell.get(key).subs.push(s);
+    }
+    return byCell;
+  }
+  // 揭晓顺序预计算：每步从「当前排名最低、还有冻结格」的队伍，揭晓其最早提交的那个格子（该格全部冻结提交一次性揭晓）
+  function computeRevealOrder(baseMap, frozenByCell, startMs) {
+    const map = cloneMap(baseMap);
+    const frozen = new Map();
+    for (const [k, c] of frozenByCell) frozen.set(k, { ...c, subs: [...c.subs] });
+    const order = [];
+    while (frozen.size) {
+      const sorted = sortedUsers(map);
+      let target = null;
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        const cells = [...frozen.values()].filter((c) => c.username === sorted[i].username);
+        if (cells.length) {
+          cells.sort((a, b) => toMs(a.subs[0].createdAt) - toMs(b.subs[0].createdAt));
+          target = cells[0];
+          break;
+        }
+      }
+      if (!target) break;
+      frozen.delete(target.username + '|' + target.problemId);
+      order.push(target);
+      for (const s of target.subs) applySub(map.get(target.username), s, startMs);
+    }
+    return order;
+  }
+
+  // 首杀：每题最早 AC 的队伍（按全部提交算，独立于封榜）
+  function computeFirstBlood(subs) {
+    const fb = new Map();
+    for (const s of subs) {
+      if (s.verdict !== 'AC') continue;
+      const t = toMs(s.createdAt);
+      const cur = fb.get(s.problemId);
+      if (!cur || t < cur.ms) fb.set(s.problemId, { username: s.username, ms: t });
+    }
+    return fb;
+  }
+
+  // 组装某一步的榜单状态：{ map, remaining }（remaining = 尚未揭晓的冻结格 key→cell）
+  function buildBoardState(step) {
+    const startMs = toMs(sbData.contest.startTime);
+    const { pre } = splitByFreeze(sbData.submissions, sbData.contest);
+    const map = newUserMap();
+    for (const s of pre) applySub(map.get(s.username), s, startMs);
+    const remaining = new Map();
+    if (reveal) {
+      for (let i = 0; i < step && i < reveal.revealOrder.length; i++) {
+        const c = reveal.revealOrder[i];
+        for (const s of c.subs) applySub(map.get(c.username), s, startMs);
+      }
+      for (let i = step; i < reveal.revealOrder.length; i++) {
+        const c = reveal.revealOrder[i];
+        remaining.set(c.username + '|' + c.problemId, c);
+      }
+    } else {
+      const { frozen } = splitByFreeze(sbData.submissions, sbData.contest);
+      for (const [k, c] of groupFrozenByCell(frozen)) remaining.set(k, c);
+    }
+    return { map, remaining, startMs };
+  }
+
+  // ---------- 榜单渲染 ----------
+  // 格子：上「提交次数（AC 后不计）」下「时间（AC=首次 AC 时间，否则最后提交时间）」；五色框
+  function cellHtml(cell, isFirstBlood, isFrozen, isNext) {
+    let cls, c, t;
+    if (isFrozen) {
+      cls = 'sb-frozen';
+      c = cell && cell.attempts ? cell.attempts : '';
+      t = '';
+    } else if (!cell || cell.status === null) {
+      cls = 'sb-empty';
+      c = ''; t = '';
+    } else if (cell.status === 'ac') {
+      cls = isFirstBlood ? 'sb-fb' : 'sb-ac';
+      c = cell.attempts; t = cell.acTime + "'";
+    } else {
+      cls = 'sb-tried';
+      c = cell.attempts; t = cell.lastTime != null ? cell.lastTime + "'" : '';
+    }
+    if (isNext) cls += ' sb-next';
+    return `<span class="sb-cell ${cls}"><span class="sb-c">${c}</span><span class="sb-t">${t}</span></span>`;
+  }
+
+  function boardHtml(usersArr, problems, firstBlood, frozenKeys, freezeCounts, flashUsername, nextKey) {
+    return `
+      <table class="table sb-table">
+        <thead>
+          <tr>
+            <th>#</th><th>队伍</th><th>题数</th><th>罚时</th>
+            ${problems.map((p) => `<th class="sb-prob-th">${String.fromCharCode(64 + p.ordinal)}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${usersArr.map((u, i) => {
+            const flash = flashUsername === u.username ? ' sb-row-flash' : '';
+            const frozen = freezeCounts.get(u.username) ? `<span class="sb-frozen-n">+${freezeCounts.get(u.username)}</span>` : '';
+            return `
+            <tr class="${flash}">
+              <td class="mono sb-rank">${i + 1}</td>
+              <td class="sb-user"><a href="/user.html?username=${encodeURIComponent(u.username)}">${esc(u.username)}</a>${frozen}</td>
+              <td class="mono sb-num">${u.solved}</td>
+              <td class="mono sb-num">${u.penalty}</td>
+              ${problems.map((p) => {
+                const key = u.username + '|' + p.problemId;
+                const isFb = firstBlood.get(p.problemId) && firstBlood.get(p.problemId).username === u.username;
+                return `<td class="sb-cell-td">${cellHtml(u.cells.get(p.problemId), isFb, frozenKeys.has(key), nextKey === key)}</td>`;
+              }).join('')}
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  function renderBoard(step, flashUsername) {
+    if (!sbData) return;
+    const wrap = document.getElementById('sb-wrap');
+    const state = buildBoardState(step);
+    if (!state.map.size) {
+      wrap.innerHTML = '<div class="empty">本场比赛还没有有效提交。</div>';
+      return;
+    }
+    const firstBlood = computeFirstBlood(sbData.submissions);
+    const frozenKeys = new Set(state.remaining.keys());
+    const freezeCounts = new Map();
+    for (const c of state.remaining.values()) {
+      freezeCounts.set(c.username, (freezeCounts.get(c.username) || 0) + c.subs.length);
+    }
+    const nextKey = reveal && step < reveal.revealOrder.length
+      ? reveal.revealOrder[step].username + '|' + reveal.revealOrder[step].problemId
+      : null;
+    wrap.innerHTML = boardHtml(sortedUsers(state.map), sbData.problems, firstBlood, frozenKeys, freezeCounts, flashUsername, nextKey);
+    const row = wrap.querySelector('.sb-row-flash');
+    if (row && row.scrollIntoView) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  // ---------- 封榜滚榜 ----------
+  function startReveal() {
+    if (revealing || !sbData || !sbData.submissions.length) return;
+    const { pre, frozen } = splitByFreeze(sbData.submissions, sbData.contest);
+    if (!frozen.length) return;
+    revealing = true;
+    const frozenByCell = groupFrozenByCell(frozen);
+    const startMs = toMs(sbData.contest.startTime);
+    const baseMap = newUserMap();
+    for (const s of pre) applySub(baseMap.get(s.username), s, startMs);
+    reveal = { revealOrder: computeRevealOrder(baseMap, frozenByCell, startMs), step: 0 };
+
+    document.getElementById('ct-scoreboard').classList.add('sb-fullscreen');
+    document.getElementById('sb-reveal-btn').style.display = 'none';
+    document.getElementById('sb-live-btn').classList.remove('hidden');
+    document.getElementById('sb-reveal-bar').classList.remove('hidden');
+    document.getElementById('sb-note').textContent = `封榜时刻榜单 · 封榜后 ${reveal.revealOrder.length} 格待揭晓（点击揭晓）`;
+    setRevealStep(0);
+  }
+
+  function setRevealStep(step) {
+    if (!revealing || !reveal) return;
+    step = Math.max(0, Math.min(step, reveal.revealOrder.length));
+    reveal.step = step;
+    document.getElementById('sb-reveal-progress').textContent = `${step} / ${reveal.revealOrder.length}`;
+    renderBoard(step, step > 0 ? reveal.revealOrder[step - 1].username : null);
+  }
+
+  function stopReveal() {
+    revealing = false;
+    reveal = null;
+    document.getElementById('ct-scoreboard').classList.remove('sb-fullscreen');
+    const btn = document.getElementById('sb-reveal-btn');
+    btn.disabled = false;
+    btn.textContent = '开始滚榜';
+    btn.style.display = '';
+    document.getElementById('sb-live-btn').classList.add('hidden');
+    document.getElementById('sb-reveal-bar').classList.add('hidden');
+    document.getElementById('sb-note').textContent = `${sbData.rows.length} 人参赛 · 实时更新`;
+    renderBoard(0, null);
+  }
+
+  async function loadScoreboard() {
+    if (!id) return;
+    scoreboardLoaded = true;
+    const r = await api('GET', `/api/contests/${id}/scoreboard`);
+    if (r.status !== 200 && r.status !== 304) return; // 304 = 缓存重验证，body 取自缓存仍可用
+    sbData = r.json;
+    // 后端 rows[].cells 是按题序的数组，渲染器按 Map 取格子——统一转成 Map（滚榜路径自己从 submissions 重建，不受影响）
+    sbData.rows.forEach((r) => { r.cells = new Map((r.cells || []).map((c) => [c.problemId, c])); });
+    if (revealing) return; // 滚榜中不覆盖
+    document.getElementById('sb-note').textContent = `${sbData.rows.length} 人参赛 · 实时更新`;
+    const revealBtn = document.getElementById('sb-reveal-btn');
+    const { frozen } = splitByFreeze(sbData.submissions, sbData.contest);
+    if (contest && contest.status === 'ended' && frozen.length) {
+      revealBtn.style.display = '';
+      revealBtn.disabled = false;
+      revealBtn.textContent = '开始滚榜';
+    } else {
+      revealBtn.style.display = 'none';
+    }
+    renderBoard(0, null);
+  }
+
+  // ---------- 评测状态：本比赛全部提交（字母题号） ----------
+  async function loadStatus() {
+    if (!id || !contest) return;
+    statusLoaded = true;
+    const box = document.getElementById('st-wrap');
+    const r = await api('GET', '/api/submissions?contestId=' + id);
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">加载失败：${esc(r.json && r.json.error || '未知错误')}</div>`;
+      return;
+    }
+    const rows = r.json;
+    const letterOf = new Map(contest.problems.map((p) => [p.id, String.fromCharCode(64 + p.ordinal)]));
+    if (!rows.length) {
+      box.innerHTML = '<div class="empty">本场比赛还没有提交。</div>';
+      return;
+    }
+    box.innerHTML = `
+      <table class="table">
+        <thead><tr>
+          <th>#</th><th>题目</th><th>提交者</th><th>语言</th><th>状态</th><th>判定</th><th>耗时 / 内存</th><th>提交时间</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map((s) => `
+            <tr>
+              <td class="mono"><a href="/submission.html?id=${s.id}">#${s.id}</a></td>
+              <td><span class="mono small" style="color:var(--ink-soft);">${esc(letterOf.get(s.problemId) || '?')}</span> <a href="/problem.html?id=${s.problemId}&contestId=${id}">${esc(s.problemTitle)}</a></td>
+              <td class="mono"><a href="/user.html?username=${encodeURIComponent(s.username)}">${esc(s.username)}</a></td>
+              <td class="mono small">${esc(s.language)}</td>
+              <td>${esc(WOJ.statusText(s.status))}</td>
+              <td>${verdictBadge(s.verdict)}</td>
+              <td class="mono small">${s.timeMs != null ? esc(s.timeMs) + 'ms / ' + esc(s.memoryKb) + 'KB' : '—'}</td>
+              <td class="mono small">${esc(fmtTime(s.createdAt))}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  // ---------- 通知（管理员可发布/编辑/删除） ----------
+  function isAdmin() {
+    const u = WOJ.getUser();
+    return !!(u && u.role === 'admin');
+  }
+  function openAnnForm(ann) {
+    editingAnnId = ann ? ann.id : null;
+    document.getElementById('ann-form-title').textContent = ann ? '编辑通知 #' + ann.id : '发布通知';
+    document.getElementById('ann-f-title').value = ann ? ann.title : '';
+    document.getElementById('ann-f-content').value = ann ? ann.content : '';
+    document.getElementById('ann-form-err').classList.add('hidden');
+    document.getElementById('ann-form').classList.remove('hidden');
+    document.getElementById('ann-form').scrollIntoView({ behavior: 'smooth' });
+  }
+  function closeAnnForm() {
+    document.getElementById('ann-form').classList.add('hidden');
+    editingAnnId = null;
+  }
+  async function saveAnnouncement() {
+    const errEl = document.getElementById('ann-form-err');
+    const err = (msg) => {
+      errEl.textContent = msg;
+      errEl.classList.remove('hidden');
+    };
+    const title = document.getElementById('ann-f-title').value.trim();
+    const content = document.getElementById('ann-f-content').value.trim();
+    if (!title) return err('标题不能为空');
+    const r = editingAnnId
+      ? await api('PATCH', `/api/contests/${id}/announcements/${editingAnnId}`, { title, content })
+      : await api('POST', `/api/contests/${id}/announcements`, { title, content });
+    if (r.status !== 200 && r.status !== 201) return err(r.json && r.json.error || '保存失败');
+    toast(editingAnnId ? '已保存修改' : '通知已发布');
+    closeAnnForm();
+    loadAnnouncements();
+  }
+
+  async function loadAnnouncements() {
+    if (!id) return;
+    announcementsLoaded = true;
+    const box = document.getElementById('ann-list');
+    document.getElementById('ann-new-btn').style.display = isAdmin() ? '' : 'none';
+    const r = await api('GET', `/api/contests/${id}/announcements`);
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">加载失败：${esc(r.json && r.json.error || '未知错误')}</div>`;
+      return;
+    }
+    const list = r.json;
+    box.innerHTML = !list.length
+      ? '<div class="empty">暂无通知。</div>'
+      : list
+          .map(
+            (a) => `
+        <div class="ann-item">
+          <div class="ann-head">
+            <span class="ann-title">${esc(a.title)}</span>
+            <span class="small muted">${esc(a.author || '')} · ${esc(fmtTime(a.createdAt))}</span>
+            ${
+              isAdmin()
+                ? `<span class="small"><a href="#" class="ann-edit" data-id="${a.id}">编辑</a> · <a href="#" class="ann-del" data-id="${a.id}">删除</a></span>`
+                : ''
+            }
+          </div>
+          ${a.content ? `<div class="ann-content">${esc(a.content)}</div>` : ''}
+        </div>`
+          )
+          .join('');
+
+    box.querySelectorAll('.ann-edit').forEach((a) => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        const item = list.find((x) => x.id === Number(a.dataset.id));
+        if (item) openAnnForm(item);
+      });
+    });
+    box.querySelectorAll('.ann-del').forEach((a) => {
+      a.addEventListener('click', async (e) => {
+        e.preventDefault();
+        if (!confirm('确认删除该通知？')) return;
+        const r = await api('DELETE', `/api/contests/${id}/announcements/${a.dataset.id}`);
+        if (r.status !== 200) {
+          toast(r.json && r.json.error || '删除失败', 'err');
+          return;
+        }
+        toast('通知已删除');
+        loadAnnouncements();
+      });
+    });
+  }
+
+  async function load() {
+    if (!id) {
+      document.getElementById('ct-sub').textContent = '缺少比赛 id';
+      return;
+    }
+    const r = await api('GET', '/api/contests/' + id);
+    const sub = document.getElementById('ct-sub');
+    if (r.status === 401) {
+      WOJ.clearSession();
+      renderNav('contests');
+      return load();
+    }
+    if (r.status !== 200) {
+      sub.textContent = r.json && r.json.error || '加载失败';
+      document.getElementById('ct-list').innerHTML = `<div class="empty">${esc(r.json && r.json.error || '比赛不存在或不可见')}</div>`;
+      return;
+    }
+    contest = r.json;
+    const s = STATUS[contest.status] || { text: esc(contest.status), cls: '' };
+    document.title = contest.title + ' · WebOJ';
+    document.getElementById('ct-title').textContent = contest.title;
+    sub.innerHTML = `比赛 #${contest.id} · <a href="/contests.html">← 返回比赛列表</a>`;
+    document.getElementById('ct-info').style.display = '';
+    document.getElementById('ct-status').innerHTML = `<span class="chip ct-status ${s.cls}">${s.text}</span>`;
+    document.getElementById('ct-start').textContent = fmtTime(contest.startTime);
+    document.getElementById('ct-end').textContent = fmtTime(contest.endTime);
+    document.getElementById('ct-count').textContent = contest.problems.length + ' 题';
+    if (contest.description) {
+      document.getElementById('ct-desc').style.display = '';
+      document.getElementById('ct-desc').textContent = contest.description;
+    }
+
+    const list = document.getElementById('ct-list');
+    if (!contest.problems.length) {
+      list.innerHTML = '<div class="empty">本场比赛暂无赛题。</div>';
+    } else {
+      list.innerHTML = contest.problems
+        .map(
+          (p) => `
+        <a class="problem-card" href="/problem.html?id=${p.id}&contestId=${contest.id}" style="display:flex;align-items:center;gap:18px;padding:15px 20px;border-bottom:1px solid var(--line);color:inherit;">
+          <span class="pid">${String.fromCharCode(64 + p.ordinal)}</span>
+          <span class="ptitle" style="flex:1;">${esc(p.title)}</span>
+          <span class="meta">
+            ${p.isCommunication ? '<span class="chip chip-comm">通信题</span>' : ''}
+            <span class="chip">${esc(p.timeLimitMs)}ms</span>
+            <span class="chip">${esc(p.memoryLimitMb)}MB</span>
+          </span>
+        </a>`
+        )
+        .join('');
+      if (list.firstElementChild) list.firstElementChild.style.borderBottom = 'none';
+    }
+
+    switchTab(currentTab()); // 按 URL hash 恢复标签（首页/题目已渲染，其余标签按需加载）
+  }
+
+  // 事件绑定
+  document.getElementById('sb-reveal-btn').addEventListener('click', startReveal);
+  document.getElementById('sb-live-btn').addEventListener('click', stopReveal);
+  document.getElementById('sb-wrap').addEventListener('click', (e) => {
+    if (!revealing || !reveal) return;
+    if (e.target.closest('a')) return; // 点队伍名链接不揭晓
+    setRevealStep(reveal.step + 1);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && revealing) stopReveal();
+  });
+  document.getElementById('st-refresh').addEventListener('click', () => loadStatus());
+  document.getElementById('ann-new-btn').addEventListener('click', () => openAnnForm(null));
+  document.getElementById('ann-form-save').addEventListener('click', saveAnnouncement);
+  document.getElementById('ann-form-cancel').addEventListener('click', closeAnnForm);
+
+  // 实时：比赛内提交评测完成 → 刷新榜单与评测状态；通知增删改 → 刷新通知（滚榜中不覆盖）
+  const ws = WOJ.openWs((msg) => {
+    if (msg.type === 'contest-scoreboard' && Number(msg.contestId) === id) {
+      if (scoreboardLoaded) loadScoreboard();
+      if (statusLoaded) loadStatus();
+    }
+    if (msg.type === 'contest-announcement' && Number(msg.contestId) === id && announcementsLoaded) {
+      loadAnnouncements();
+    }
+  });
+
+  load().catch((e) => toast('加载失败：' + e.message, 'err'));
+</script>
+</body>
+</html>

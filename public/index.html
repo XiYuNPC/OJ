@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>题库 · WebOJ</title>
 <link rel="stylesheet" href="/css/style.css">
@@ -41,10 +42,19 @@
       box.innerHTML = `<div class="empty">题库暂无题目。管理员可在<a href="/admin.html">后台</a>发布题目。</div>`;
       return;
     }
+    const statusIcon = (status) => {
+      const check = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8.5L6.5 11.5L12.5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      const minus = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 8H12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+      if (status === 'solved') return `<span class="pt-status solved" title="已通过">${check}</span>`;
+      if (status === 'attempted') return `<span class="pt-status attempted" title="尝试过，未通过">${minus}</span>`;
+      return '<span class="pt-status"></span>';
+    };
+
     box.innerHTML = items
       .map(
         (p) => `
       <a class="problem-card" href="/problem.html?id=${p.id}" style="display:flex;align-items:center;gap:18px;padding:15px 20px;border-bottom:1px solid var(--line);color:inherit;">
+        ${statusIcon(p.status)}
         <span class="pid">P${String(p.id).padStart(4, '0')}</span>
         <span class="ptitle" style="flex:1;">${esc(p.title)}</span>
         <span class="meta">

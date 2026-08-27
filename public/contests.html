@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>比赛 · WebOJ</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="nav"></div>
+
+<main class="wrap">
+  <div class="page-head">
+    <div class="eyebrow">CONTESTS</div>
+    <h1 class="page-title">比赛</h1>
+    <p class="page-sub">浏览进行中与历史比赛，点击进入查看赛题。游客可浏览公开比赛。</p>
+  </div>
+  <div id="list" class="card"><div class="empty">加载中…</div></div>
+</main>
+
+<script src="/js/api.js"></script>
+<script>
+  const { api, esc, renderNav, toast, fmtTime } = WOJ;
+  renderNav('contests');
+
+  const STATUS = {
+    upcoming: { text: '未开始', cls: 'ct-upcoming' },
+    ongoing: { text: '进行中', cls: 'ct-ongoing' },
+    ended: { text: '已结束', cls: 'ct-ended' },
+  };
+
+  async function load() {
+    const r = await api('GET', '/api/contests');
+    const box = document.getElementById('list');
+    if (r.status === 401) {
+      WOJ.clearSession();
+      renderNav('contests');
+      return load();
+    }
+    if (r.status !== 200) {
+      box.innerHTML = `<div class="empty">加载失败：${esc(r.json && r.json.error || '未知错误')}</div>`;
+      return;
+    }
+    const items = r.json;
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">暂无比赛。管理员可在<a href="/admin.html">后台</a>创建比赛。</div>';
+      return;
+    }
+    box.innerHTML = items
+      .map((c) => {
+        const s = STATUS[c.status] || { text: esc(c.status), cls: '' };
+        return `
+      <a class="contest-card" href="/contest.html?id=${c.id}">
+        <span class="ct-head">
+          <span class="ct-title">${esc(c.title)}</span>
+          <span class="chip ct-status ${s.cls}">${s.text}</span>
+        </span>
+        <span class="ct-desc">${esc(c.description || '暂无简介')}</span>
+        <span class="ct-meta">
+          <span class="chip">${c.problemCount} 题</span>
+          <span class="ct-time">${fmtTime(c.startTime)} → ${fmtTime(c.endTime)}</span>
+        </span>
+      </a>`;
+      })
+      .join('');
+    if (box.firstElementChild) box.firstElementChild.style.borderBottom = 'none';
+  }
+
+  load().catch((e) => toast('加载失败：' + e.message, 'err'));
+</script>
+</body>
+</html>

@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>提交记录 · WebOJ</title>
 <link rel="stylesheet" href="/css/style.css">
@@ -62,8 +63,8 @@
           ${rows.map((s) => `
             <tr>
               <td class="mono"><a href="/submission.html?id=${s.id}">#${s.id}</a></td>
-              <td><a href="/problem.html?id=${s.problemId}">${esc(s.problemTitle)}</a></td>
-              <td class="mono">${esc(s.username)}</td>
+              <td><a href="/problem.html?id=${s.problemId}">${esc(s.problemTitle)}</a>${s.contestId != null ? ` <a class="chip chip-comm" href="/contest.html?id=${s.contestId}">比赛 #${s.contestId}</a>` : ''}</td>
+              <td class="mono"><a href="/user.html?username=${encodeURIComponent(s.username)}">${esc(s.username)}</a></td>
               <td class="mono small">${esc(s.language)}</td>
               <td>${esc(statusText(s.status))}</td>
               <td>${verdictBadge(s.verdict)}</td>
